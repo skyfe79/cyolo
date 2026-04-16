@@ -16,4 +16,28 @@ pub enum CyoloError {
 
     #[error("cyolo: {0} is not yet implemented")]
     NotImplemented(String),
+
+    #[allow(dead_code)]
+    #[error("cyolo: failed to parse config at {path}: {source}")]
+    ConfigParseError {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[allow(dead_code)]
+    #[error("cyolo: {context}: {source}")]
+    ConfigIoError {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[allow(dead_code)]
+    #[error("cyolo: profile '{name}' already exists")]
+    ProfileAlreadyExists { name: String },
+
+    #[allow(dead_code)]
+    #[error("cyolo: profile '{name}' not found. Run: cyolo profile add {name}")]
+    ProfileNotFound { name: String },
 }
