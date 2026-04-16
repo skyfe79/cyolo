@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::{self, CyoloConfig, Profile};
 use crate::error::CyoloError;
+use crate::symlink;
 
 /// Route profile subcommands.
 ///
@@ -15,7 +16,7 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             println!("Usage: cyolo profile <add|rm|list>");
             println!();
             println!("Commands:");
-            println!("  add <name> [config-dir]  Register a new profile");
+            println!("  add <name> [config-dir] [--no-share]  Register a new profile");
             println!("  rm <name>                Remove a profile");
             println!("  list                     List all profiles");
             Ok(())
@@ -30,15 +31,19 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
 
 /// Add a new profile to the config.
 ///
-/// Usage: `cyolo profile add <name> [config-dir]`
+/// Usage: `cyolo profile add <name> [config-dir] [--no-share]`
 pub fn add(args: &[String]) -> Result<(), CyoloError> {
-    let name = args.first().ok_or_else(|| {
-        eprintln!("Usage: cyolo profile add <name> [config-dir]");
+    // Parse --no-share flag (position-independent)
+    let no_share = args.iter().any(|a| a == "--no-share");
+    let positional: Vec<&String> = args.iter().filter(|a| a.as_str() != "--no-share").collect();
+
+    let name = positional.first().ok_or_else(|| {
+        eprintln!("Usage: cyolo profile add <name> [config-dir] [--no-share]");
         CyoloError::NonZeroExit(1)
     })?;
 
     // Resolve config_dir: use provided path or default to ~/.claude-<name>
-    let config_dir = if let Some(dir) = args.get(1) {
+    let config_dir = if let Some(dir) = positional.get(1) {
         expand_tilde(dir)
     } else {
         let home = dirs::home_dir().ok_or_else(|| CyoloError::ConfigIoError {
@@ -55,8 +60,8 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
     let mut cfg = CyoloConfig::load()?;
 
     // Check for duplicate
-    if cfg.profiles.contains_key(name) {
-        return Err(CyoloError::ProfileAlreadyExists { name: name.clone() });
+    if cfg.profiles.contains_key(*name) {
+        return Err(CyoloError::ProfileAlreadyExists { name: (*name).clone() });
     }
 
     // Create config_dir with 0700 if it doesn't exist; reject if path exists but is not a directory
@@ -83,11 +88,16 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
             })?;
     }
 
+    // Create shared symlinks unless --no-share
+    if !no_share {
+        symlink::create_shared_symlinks(&config_dir)?;
+    }
+
     // Register profile
     cfg.profiles.insert(
-        name.clone(),
+        (*name).clone(),
         Profile {
-            name: name.clone(),
+            name: (*name).clone(),
             config_dir: config_dir.clone(),
         },
     );
@@ -95,7 +105,15 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
     // Save config
     cfg.save()?;
 
-    println!("Added profile: {} -> {}", name, config_dir.display());
+    // Confirmation message with symlink status
+    let symlink_note = if no_share {
+        "(no shared symlinks)"
+    } else if symlink::is_source_dir(&config_dir) {
+        "(symlinks skipped, source directory)"
+    } else {
+        "(shared symlinks created)"
+    };
+    println!("Added profile: {} -> {} {}", name, config_dir.display(), symlink_note);
     Ok(())
 }
 
