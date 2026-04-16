@@ -75,6 +75,49 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
     Ok(())
 }
 
+/// Remove a profile from the config.
+///
+/// The profile's directory on disk is preserved (not deleted).
+///
+/// Usage: `cyolo profile rm <name>`
+#[allow(dead_code)]
+pub fn rm(args: &[String]) -> Result<(), CyoloError> {
+    let name = args.first().ok_or_else(|| {
+        eprintln!("Usage: cyolo profile rm <name>");
+        CyoloError::NonZeroExit(1)
+    })?;
+
+    // Ensure ~/.cyolo/ exists
+    config::ensure_dir()?;
+
+    // Load config
+    let mut cfg = CyoloConfig::load()?;
+
+    // Check profile exists
+    let profile = cfg
+        .profiles
+        .get(name)
+        .ok_or_else(|| CyoloError::ProfileNotFound { name: name.clone() })?;
+
+    // Capture config_dir for the confirmation message before removing
+    let config_dir = profile.config_dir.clone();
+
+    // Remove from profiles
+    cfg.profiles.remove(name);
+
+    // Clear default if removing the default profile
+    if cfg.default.as_deref() == Some(name.as_str()) {
+        cfg.default = None;
+    }
+
+    // Save config
+    cfg.save()?;
+
+    println!("Removed profile: {name}");
+    println!("Directory preserved: {}", config_dir.display());
+    Ok(())
+}
+
 /// Expand leading `~` or `~/` to the user's home directory.
 fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
