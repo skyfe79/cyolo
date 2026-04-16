@@ -1,0 +1,178 @@
+# PRD: Global Config & Profile Registry (v2)
+
+## Overview
+
+v2 adds the persistent configuration layer that all profile operations depend on. It creates `~/.cyolo/config.json` as the global profile registry and implements three profile subcommands: `add`, `rm`, and `list`. Config reads/writes use atomic file operations to prevent corruption.
+
+This version replaces the `profile` stub from v1 with real dispatch. No symlinks, walk-up detection, or diet logic — those come in later versions.
+
+## Scope
+
+**In scope:**
+- `~/.cyolo/` directory creation with `0700` permissions
+- `config.json` schema: default profile name + profiles map
+- Config load (create default if missing, error on parse failure)
+- Config save with atomic write (temp file + fsync + rename)
+- `cyolo profile add <name> [config-dir]` — register profile, create directory
+- `cyolo profile rm <name>` — unregister profile (preserve directory)
+- `cyolo profile list` — display profiles with default marker
+- Error type extensions for config/profile operations
+- CLI routing: replace `NotImplemented("profile")` with real dispatch
+
+**Out of scope:**
+- Symlink creation/management (v3)
+- Walk-up `.claude-profile.json` detection (v4)
+- `profile default`, `profile init`, `profile current`, `profile link` (v4/v5)
+- `--default` and `--no-share` flags on `profile add` (v5 for default, v3 for no-share)
+- Diet functionality (v6+)
+- Colored output (v9)
+
+## Previous Version
+
+v1 completed all 5 tasks with no failures. The module structure (`main.rs`, `cli.rs`, `runner.rs`, `error.rs`), manual arg routing, and error handling are solid. No technical debt or self-repair items.
+
+## Features
+
+### F1: Config Module (`config.rs`)
+
+Data layer for `~/.cyolo/config.json`.
+
+**Schema:**
+
+```rust
+pub struct CyoloConfig {
+    pub default: Option<String>,          // default profile name
+    pub profiles: BTreeMap<String, Profile>,  // deterministic key order
+}
+
+pub struct Profile {
+    pub name: String,
+    pub config_dir: PathBuf,
+}
+```
+
+**Operations:**
+
+1. `config_dir()` — resolve `~/.cyolo/` using `dirs::home_dir()`
+2. `config_path()` — resolve `~/.cyolo/config.json`
+3. `ensure_dir()` — create `~/.cyolo/` with mode `0o700` if not exists (use `DirBuilder::new().mode(0o700)`)
+4. `load()` — read and parse config.json. Return default empty config if file not found. Return error if file exists but fails to parse.
+5. `save()` — atomic write: serialize to JSON, write to `.tmp` file in same directory, `sync_all()`, then `rename()` over target. Pretty-print JSON for human readability.
+
+**Acceptance criteria:**
+- `load()` on missing file returns empty `CyoloConfig` (no error)
+- `load()` on malformed JSON returns parse error
+- `save()` produces human-readable JSON with sorted keys
+- `save()` does not corrupt config if process is killed mid-write
+- `~/.cyolo/` is created with `0700` permissions
+
+### F2: Error Type Extensions (`error.rs`)
+
+Add config/profile error variants to `CyoloError`:
+
+- `ConfigParseError` — JSON deserialization failure with file path
+- `ConfigIoError` — file system error during config read/write
+- `ProfileAlreadyExists` — profile name already registered
+- `ProfileNotFound` — profile name not in config
+
+**Acceptance criteria:**
+- Each variant produces a user-friendly error message
+- `ConfigParseError` includes the file path in the message
+- `ProfileNotFound` suggests `cyolo profile add <name>`
+
+### F3: Profile Module (`profile.rs`)
+
+Command layer for profile operations. Dispatches based on first argument after `profile`.
+
+**Sub-subcommand routing:** Manual `match` on first arg (same pattern as v1 top-level routing). No clap for v2 — clap integration comes when more complex flags are needed.
+
+#### F3.1: `profile add <name> [config-dir]`
+
+1. Load config (or create default if missing)
+2. Validate: name not already registered → `ProfileAlreadyExists` error
+3. Resolve config_dir: if omitted, use `~/.claude-<name>` (via `dirs::home_dir()`)
+4. Expand tilde in config_dir if provided (shell usually expands, but handle quoted `~` case)
+5. Create config_dir with `0700` permissions if it doesn't exist (skip if exists — reuse)
+6. Insert `Profile { name, config_dir }` into `config.profiles`
+7. Atomic-write config.json
+8. Print confirmation: `Added profile: <name> → <config_dir>`
+
+**Acceptance criteria:**
+- `cyolo profile add work` → creates `~/.claude-work/`, registers in config
+- `cyolo profile add personal ~/.claude` → registers existing dir, no dir creation
+- `cyolo profile add work` twice → error "profile 'work' already exists"
+- Omitted config-dir defaults to `~/.claude-<name>`
+- Tilde in quoted path (`"~/.custom"`) is expanded
+
+#### F3.2: `profile rm <name>`
+
+1. Load config
+2. Validate: name exists → `ProfileNotFound` error if not
+3. Remove from `config.profiles`
+4. If `config.default == Some(name)`: set default to `None`
+5. Atomic-write config.json
+6. Print: `Removed profile: <name>` and `Directory preserved: <path>`
+
+**Acceptance criteria:**
+- `cyolo profile rm work` → removes from config, prints directory note
+- Removing the default profile clears the default
+- `cyolo profile rm nonexistent` → error with suggestion
+
+#### F3.3: `profile list`
+
+1. Load config
+2. If no profiles: print `No profiles registered. Run: cyolo profile add <name>`
+3. Otherwise: print each profile, one per line, left-aligned names padded to longest
+4. Mark default profile with `*` prefix
+
+**Output format:**
+```
+* personal → /Users/codingmax/.claude
+  work     → /Users/codingmax/.claude-work
+```
+
+**Acceptance criteria:**
+- Empty config → helpful message
+- Multiple profiles → aligned output
+- Default profile → `*` prefix
+
+#### F3.4: `profile` (no subcommand) and unknown subcommands
+
+- `cyolo profile` with no args → print usage hint
+- Unknown subcommand → error with available subcommands list
+
+### F4: CLI Routing Update (`cli.rs`)
+
+Replace the `Command::Profile(_) => Err(CyoloError::NotImplemented("profile".into()))` stub with:
+
+```rust
+Command::Profile(args) => profile::dispatch(&args),
+```
+
+Add `mod profile` and `mod config` to `main.rs`.
+
+**Acceptance criteria:**
+- `cyolo profile add work` → dispatches to profile::add
+- `cyolo profile list` → dispatches to profile::list
+- `cyolo profile rm work` → dispatches to profile::rm
+- Other commands (update, diet, pass-through) unchanged
+
+## Technical Decisions
+
+- **BTreeMap over HashMap** for profiles: deterministic JSON key ordering for readable diffs and manual editing.
+- **Atomic write with stdlib**: temp file + `sync_all()` + `rename()` — no extra crate needed. Temp file uses `.tmp` extension in same directory to ensure same-filesystem rename.
+- **No `--default` flag on `profile add` in v2**: The `default` field exists in the schema but `profile default <name>` command comes in v5. Config supports it; command doesn't expose it yet.
+- **Manual profile sub-subcommand routing**: Matches v1's pattern. Clap integration deferred to when complex flags are needed.
+- **Tilde expansion**: Use `dirs::home_dir()` to expand leading `~` if the shell didn't do it (quoted arguments).
+
+## Module Structure (after v2)
+
+```
+src/
+├── main.rs       # Entry point (add mod config, mod profile)
+├── cli.rs        # Route profile to profile::dispatch
+├── runner.rs     # Process execution (unchanged)
+├── error.rs      # Add config/profile error variants
+├── config.rs     # CyoloConfig schema, load, save, atomic write
+└── profile.rs    # Profile dispatch: add, rm, list
+```

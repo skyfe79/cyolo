@@ -1,0 +1,37 @@
+{
+  "workflow": "evo-pro",
+  "roadmap": "prd/version-roadmap.json",
+  "currentVersion": "v3",
+  "versions": [
+    {
+      "version": "v1",
+      "created": "2026-04-16",
+      "status": "completed",
+      "folder": "@v1",
+      "description": "Project Scaffolding & Basic Pass-through"
+    },
+    {
+      "version": "v2",
+      "created": "2026-04-16",
+      "status": "completed",
+      "folder": "@v2",
+      "description": "Global Config & Profile Registry"
+    },
+    {
+      "version": "v3",
+      "created": "2026-04-16",
+      "status": "active",
+      "folder": "v3",
+      "description": "Symlink-based Config Sharing"
+    }
+  ],
+  "activeFiles": {
+    "wants": "prd/v3/wants.txt",
+    "prd": "prd/v3/prd.txt"
+  },
+  "folderNamingRules": {
+    "active": "v{version}",
+    "completed": "@v{version}",
+    "description": "@ prefix indicates completed versions"
+  }
+}
