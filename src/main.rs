@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod profile;
 mod runner;
+mod symlink;
 
 use error::CyoloError;
 
