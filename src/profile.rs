@@ -118,6 +118,37 @@ pub fn rm(args: &[String]) -> Result<(), CyoloError> {
     Ok(())
 }
 
+/// List all registered profiles.
+///
+/// Displays profiles in a sorted table with the default profile
+/// marked by a `*` prefix.
+///
+/// Usage: `cyolo profile list`
+#[allow(dead_code)]
+pub fn list() -> Result<(), CyoloError> {
+    config::ensure_dir()?;
+    let cfg = CyoloConfig::load()?;
+
+    if cfg.profiles.is_empty() {
+        println!("No profiles registered. Run: cyolo profile add <name>");
+        return Ok(());
+    }
+
+    let max_width = cfg.profiles.keys().map(|k| k.len()).max().unwrap_or(0);
+
+    for (name, profile) in &cfg.profiles {
+        let marker = if cfg.default.as_deref() == Some(name.as_str()) {
+            "* "
+        } else {
+            "  "
+        };
+        let dir = profile.config_dir.display();
+        println!("{marker}{name:<max_width$} -> {dir}");
+    }
+
+    Ok(())
+}
+
 /// Expand leading `~` or `~/` to the user's home directory.
 fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
