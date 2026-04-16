@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod error;
+mod profile;
 mod runner;
 
 use error::CyoloError;
