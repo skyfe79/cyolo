@@ -1,7 +1,7 @@
 {
   "workflow": "evo-pro",
   "roadmap": "prd/version-roadmap.json",
-  "currentVersion": "v3",
+  "currentVersion": "v4",
   "versions": [
     {
       "version": "v1",
@@ -20,14 +20,21 @@
     {
       "version": "v3",
       "created": "2026-04-16",
-      "status": "active",
-      "folder": "v3",
+      "status": "completed",
+      "folder": "@v3",
       "description": "Symlink-based Config Sharing"
+    },
+    {
+      "version": "v4",
+      "created": "2026-04-17",
+      "status": "active",
+      "folder": "v4",
+      "description": "Profile Detection & Walk-up"
     }
   ],
   "activeFiles": {
-    "wants": "prd/v3/wants.txt",
-    "prd": "prd/v3/prd.txt"
+    "wants": "prd/v4/wants.txt",
+    "prd": "prd/v4/prd.txt"
   },
   "folderNamingRules": {
     "active": "v{version}",

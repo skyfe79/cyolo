@@ -1,0 +1,162 @@
+# PRD: Symlink-based Config Sharing (v3)
+
+## Overview
+
+v3 adds symlink creation when registering profiles, so shared items (settings, skills, commands, agents) from `~/.claude/` are automatically available in new profile directories. It also adds `profile link` for re-creating symlinks on existing profiles and `--no-share` to opt out.
+
+This version builds on v2's profile add/rm/list. No walk-up detection, default management, or diet logic — those come in later versions.
+
+## Scope
+
+**In scope:**
+- Define the 6 shared items as a constant list
+- Symlink creation module (`symlink.rs`)
+- Self-reference detection: skip symlinks when config_dir resolves to `~/.claude`
+- Source handling: skip file symlinks if source missing; create empty dir at source for directory items then symlink
+- Target handling: if target already exists, warn and skip (no overwrite)
+- Integrate symlink creation into `profile add` (after directory creation, before config save)
+- `--no-share` flag on `profile add` to skip symlink creation
+- `profile link <name>` command to re-create symlinks on an existing profile
+- New error variants for symlink operations
+- Update profile dispatch and usage help
+
+**Out of scope:**
+- Walk-up `.claude-profile.json` detection (v4)
+- `profile default`, `profile init`, `profile current` (v4/v5)
+- `--default` flag on `profile add` (v5)
+- Diet functionality (v6+)
+- Colored output (v9)
+- Relative symlinks (absolute only — profiles live at fixed paths)
+- Custom shared item lists (fixed 6 items in MVP)
+
+## Previous Version
+
+v2 completed all 7 tasks with 0 failures. Module structure (`main.rs`, `cli.rs`, `runner.rs`, `error.rs`, `config.rs`, `profile.rs`), manual arg routing, atomic config writes, and `expand_tilde()` helper are solid. No technical debt or self-repair items.
+
+## Features
+
+### F1: Symlink Module (`symlink.rs`)
+
+Core symlink creation logic, separated from profile commands for clarity and testability.
+
+**Shared items constant:**
+
+```rust
+pub const SHARED_ITEMS: &[SharedItem] = &[
+    SharedItem { name: "CLAUDE.md", kind: ItemKind::File },
+    SharedItem { name: "settings.json", kind: ItemKind::File },
+    SharedItem { name: "settings.local.json", kind: ItemKind::File },
+    SharedItem { name: "commands", kind: ItemKind::Directory },
+    SharedItem { name: "skills", kind: ItemKind::Directory },
+    SharedItem { name: "agents", kind: ItemKind::Directory },
+];
+```
+
+**`is_source_dir(config_dir)` — Self-reference detection:**
+1. Resolve `~/.claude` via `dirs::home_dir()`
+2. Compare with `config_dir` using `Path::canonicalize()` on both
+3. Fall back to direct path comparison if canonicalize fails (path may not exist yet)
+4. Returns `true` if config_dir IS the source directory
+
+**`create_shared_symlinks(config_dir)` — Create all 6 symlinks:**
+1. If `is_source_dir(config_dir)` → print note, return Ok (skip all)
+2. Resolve source base: `~/.claude/`
+3. For each shared item:
+   - Source: `~/.claude/{item.name}`
+   - Target: `{config_dir}/{item.name}`
+   - If source does not exist:
+     - Directory items → create empty dir at source with `0o755`, then proceed
+     - File items → skip with info message, continue to next item
+   - Check target with `fs::symlink_metadata()` (catches broken symlinks too):
+     - If anything exists at target → warn, skip
+   - Create symlink: `std::os::unix::fs::symlink(source, target)`
+   - On symlink error → warn, continue (don't abort entire operation)
+
+**Acceptance criteria:**
+- Files: skip symlink when source missing, warn when target exists
+- Directories: create empty source dir when missing, then symlink
+- Self-reference (`~/.claude`) → no symlinks created, informational message
+- Symlink error on one item does not prevent remaining items from being processed
+
+### F2: Error Type Extensions (`error.rs`)
+
+Add symlink-related variant to `CyoloError`:
+
+- `SymlinkError { item, source, target, source_err }` — symlink creation failed for a specific item
+
+Note: most symlink edge cases (missing source, existing target) are handled as warnings in `symlink.rs`, not as hard errors. `SymlinkError` covers unexpected I/O failures only.
+
+**Acceptance criteria:**
+- Error message includes item name, source path, and target path
+- Warning messages for skip/existing-target are printed to stderr directly (not errors)
+
+### F3: Integrate Symlinks into `profile add` (`profile.rs`)
+
+Modify the existing `add()` function:
+
+1. Parse `--no-share` flag from args (positional args before it: `<name> [config-dir]`)
+2. After directory creation and before config save, insert:
+   ```
+   if !no_share {
+       symlink::create_shared_symlinks(&config_dir)?;
+   }
+   ```
+3. Update the confirmation message to mention symlink status
+
+Execution order in `profile add`:
+1. Validate name not duplicate (existing)
+2. Resolve config_dir (existing)
+3. Create config_dir with 0700 (existing)
+4. **[NEW]** Create symlinks (unless `--no-share` or self-reference)
+5. Register profile in config (existing)
+6. Save config (existing)
+
+**Acceptance criteria:**
+- `cyolo profile add work` → creates dir + symlinks + registers
+- `cyolo profile add work --no-share` → creates dir + registers (no symlinks)
+- `cyolo profile add personal ~/.claude` → registers, skips symlinks (self-reference)
+- Flag order: `cyolo profile add work --no-share` and `cyolo profile add --no-share work` both work
+
+### F4: `profile link <name>` Command (`profile.rs`)
+
+New subcommand for re-creating symlinks on an already-registered profile.
+
+1. Load config, find profile by name → `ProfileNotFound` if missing
+2. Call `symlink::create_shared_symlinks(&profile.config_dir)`
+3. Idempotent: existing correct symlinks are left as-is (symlink_metadata detects them)
+
+**Acceptance criteria:**
+- `cyolo profile link work` → creates missing symlinks, skips existing ones
+- `cyolo profile link personal` where personal=`~/.claude` → self-reference skip message
+- `cyolo profile link unknown` → ProfileNotFound error
+- Running `link` twice produces same result (idempotent)
+
+### F5: Update Profile Dispatch and Usage (`profile.rs`)
+
+1. Add `"link"` arm to the dispatch match
+2. Update the usage help text to include `link` and the `--no-share` note for `add`
+
+**Acceptance criteria:**
+- `cyolo profile link work` dispatches correctly
+- `cyolo profile` (no args) shows updated help including `link`
+
+## Technical Decisions
+
+- **Absolute symlinks only**: Profile directories live at fixed well-known paths (`~/.claude-<name>`). Portability is not a concern.
+- **`std::os::unix::fs::symlink`**: Single function handles both file and directory symlinks on Unix. No extra crate needed.
+- **`symlink_metadata` over `exists()`**: Catches broken symlinks (where `exists()` would return false but the link inode is still present).
+- **Warn-and-continue on per-item failure**: A single failing symlink should not prevent the other 5 from being created. Hard errors only for unexpected I/O failures.
+- **No config schema change**: Symlinks are filesystem-level, not stored in config.json.
+
+## Module Structure (after v3)
+
+```
+src/
+├── main.rs       # Entry point (add mod symlink)
+├── cli.rs        # Unchanged
+├── runner.rs     # Unchanged
+├── error.rs      # Add SymlinkError variant
+├── config.rs     # Unchanged
+├── profile.rs    # Add --no-share, link subcommand, symlink integration
+└── symlink.rs    # [NEW] Shared items, self-reference check, symlink creation
+```
