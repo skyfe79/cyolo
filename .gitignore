@@ -1,0 +1,34 @@
+
+
+# agent-pro: generated files (untracked)
+.agents/
+.claude/
+.codex/
+.team/
+prd/
+CLAUDE.md
+CLAUDE_MEMORY.md
+CLAUDE_CODEX.md
+CLAUDE_GROUP.md
+
+# agent-pro: local files
+.claude/memory.db
+.claude/memory.db-*
+.claude/memory.config.json
+.slack_config.json
+.cruze-state.json
+.worktree-sessions.json
+.tdd-config.json
+.worktrees/.agent-pro-sessions/
+deep-plan-config.json
+ecosystem.config.cjs
+.cursor/
+logs/
+.qmd-cache/
+page-*.png
+page-*.jpeg
+
+
+# Added by cargo
+
+/target
