@@ -12,18 +12,20 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("add") => add(&args[1..]),
         Some("rm") | Some("remove") => rm(&args[1..]),
         Some("list") | Some("ls") => list(),
+        Some("link") => link(&args[1..]),
         None => {
-            println!("Usage: cyolo profile <add|rm|list>");
+            println!("Usage: cyolo profile <add|rm|list|link>");
             println!();
             println!("Commands:");
             println!("  add <name> [config-dir] [--no-share]  Register a new profile");
             println!("  rm <name>                Remove a profile");
             println!("  list                     List all profiles");
+            println!("  link <name>              Re-create shared symlinks for a profile");
             Ok(())
         }
         Some(cmd) => {
             eprintln!("cyolo: unknown profile command '{cmd}'");
-            eprintln!("Available: add, rm, list");
+            eprintln!("Available: add, rm, list, link");
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -186,6 +188,36 @@ pub fn list() -> Result<(), CyoloError> {
         println!("{marker}{name:<max_width$} -> {dir}");
     }
 
+    Ok(())
+}
+
+/// Re-create shared symlinks for an already-registered profile.
+///
+/// Idempotent: existing correct symlinks are left as-is.
+///
+/// Usage: `cyolo profile link <name>`
+pub fn link(args: &[String]) -> Result<(), CyoloError> {
+    if args.len() != 1 {
+        eprintln!("Usage: cyolo profile link <name>");
+        return Err(CyoloError::NonZeroExit(1));
+    }
+    let name = &args[0];
+
+    config::ensure_dir()?;
+
+    let cfg = CyoloConfig::load()?;
+
+    let profile = cfg
+        .profiles
+        .get(name)
+        .ok_or_else(|| CyoloError::ProfileNotFound { name: name.clone() })?;
+
+    // Normalize config_dir in case it was manually edited with a tilde prefix.
+    let config_dir = expand_tilde(&profile.config_dir.to_string_lossy());
+
+    symlink::create_shared_symlinks(&config_dir)?;
+
+    println!("Symlinks updated for profile '{name}'");
     Ok(())
 }
 
