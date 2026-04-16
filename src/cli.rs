@@ -1,4 +1,5 @@
 use crate::error::CyoloError;
+use crate::profile;
 use crate::runner;
 
 /// Top-level command classification.
@@ -30,7 +31,7 @@ pub fn route() -> Result<(), CyoloError> {
 
     match classify(&args) {
         Command::Update => runner::run_update(),
-        Command::Profile(_) => Err(CyoloError::NotImplemented("profile".into())),
+        Command::Profile(args) => profile::dispatch(&args),
         Command::Diet(_) => Err(CyoloError::NotImplemented("diet".into())),
         Command::Claude(args) => runner::run_claude(&args),
     }

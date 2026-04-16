@@ -3,10 +3,34 @@ use std::path::PathBuf;
 use crate::config::{self, CyoloConfig, Profile};
 use crate::error::CyoloError;
 
+/// Route profile subcommands.
+///
+/// Usage: `cyolo profile <add|rm|list>`
+pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
+    match args.first().map(|s| s.as_str()) {
+        Some("add") => add(&args[1..]),
+        Some("rm") | Some("remove") => rm(&args[1..]),
+        Some("list") | Some("ls") => list(),
+        None => {
+            println!("Usage: cyolo profile <add|rm|list>");
+            println!();
+            println!("Commands:");
+            println!("  add <name> [config-dir]  Register a new profile");
+            println!("  rm <name>                Remove a profile");
+            println!("  list                     List all profiles");
+            Ok(())
+        }
+        Some(cmd) => {
+            eprintln!("cyolo: unknown profile command '{cmd}'");
+            eprintln!("Available: add, rm, list");
+            Err(CyoloError::NonZeroExit(1))
+        }
+    }
+}
+
 /// Add a new profile to the config.
 ///
 /// Usage: `cyolo profile add <name> [config-dir]`
-#[allow(dead_code)]
 pub fn add(args: &[String]) -> Result<(), CyoloError> {
     let name = args.first().ok_or_else(|| {
         eprintln!("Usage: cyolo profile add <name> [config-dir]");
@@ -80,7 +104,6 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
 /// The profile's directory on disk is preserved (not deleted).
 ///
 /// Usage: `cyolo profile rm <name>`
-#[allow(dead_code)]
 pub fn rm(args: &[String]) -> Result<(), CyoloError> {
     let name = args.first().ok_or_else(|| {
         eprintln!("Usage: cyolo profile rm <name>");
@@ -124,7 +147,6 @@ pub fn rm(args: &[String]) -> Result<(), CyoloError> {
 /// marked by a `*` prefix.
 ///
 /// Usage: `cyolo profile list`
-#[allow(dead_code)]
 pub fn list() -> Result<(), CyoloError> {
     config::ensure_dir()?;
     let cfg = CyoloConfig::load()?;
@@ -160,5 +182,20 @@ fn expand_tilde(path: &str) -> PathBuf {
         }
     } else {
         PathBuf::from(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_dispatch_unknown_subcommand_returns_error() {
+        let result = dispatch(&args(&["unknown"]));
+        assert!(result.is_err());
     }
 }
