@@ -17,7 +17,6 @@ pub enum CyoloError {
     #[error("cyolo: {0} is not yet implemented")]
     NotImplemented(String),
 
-    #[allow(dead_code)]
     #[error("cyolo: failed to parse config at {path}: {source}")]
     ConfigParseError {
         path: PathBuf,
@@ -25,7 +24,6 @@ pub enum CyoloError {
         source: serde_json::Error,
     },
 
-    #[allow(dead_code)]
     #[error("cyolo: {context}: {source}")]
     ConfigIoError {
         context: String,
