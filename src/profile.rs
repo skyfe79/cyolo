@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::config::{self, CyoloConfig, Profile};
 use crate::error::CyoloError;
 use crate::symlink;
+use owo_colors::OwoColorize;
 
 /// Route profile subcommands.
 ///
@@ -17,7 +18,7 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("init") => profile_init(&args[1..]),
         Some("default") => profile_default(&args[1..]),
         None => {
-            println!("Usage: cyolo profile <add|rm|list|link|current|init|default>");
+            println!("{} cyolo profile <add|rm|list|link|current|init|default>", "Usage:".yellow().bold());
             println!();
             println!("Commands:");
             println!("  add <name> [config-dir] [--no-share]  Register a new profile");
@@ -30,8 +31,8 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             Ok(())
         }
         Some(cmd) => {
-            eprintln!("cyolo: unknown profile command '{cmd}'");
-            eprintln!("Available: add, rm, list, link, current, init, default");
+            eprintln!("{} unknown profile command '{}'", "error:".red().bold(), cmd.bold());
+            eprintln!("{}", "Available: add, rm, list, link, current, init, default".dimmed());
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -46,7 +47,7 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
     let positional: Vec<&String> = args.iter().filter(|a| a.as_str() != "--no-share").collect();
 
     let name = positional.first().ok_or_else(|| {
-        eprintln!("Usage: cyolo profile add <name> [config-dir] [--no-share]");
+        eprintln!("{} cyolo profile add <name> [config-dir] [--no-share]", "Usage:".yellow().bold());
         CyoloError::NonZeroExit(1)
     })?;
 
@@ -121,7 +122,7 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
     } else {
         "(shared symlinks created)"
     };
-    println!("Added profile: {} -> {} {}", name, config_dir.display(), symlink_note);
+    println!("Added profile: {} -> {} {}", name.green(), config_dir.display().to_string().green(), symlink_note);
     Ok(())
 }
 
@@ -132,7 +133,7 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
 /// Usage: `cyolo profile rm <name>`
 pub fn rm(args: &[String]) -> Result<(), CyoloError> {
     let name = args.first().ok_or_else(|| {
-        eprintln!("Usage: cyolo profile rm <name>");
+        eprintln!("{} cyolo profile rm <name>", "Usage:".yellow().bold());
         CyoloError::NonZeroExit(1)
     })?;
 
@@ -162,8 +163,8 @@ pub fn rm(args: &[String]) -> Result<(), CyoloError> {
     // Save config
     cfg.save()?;
 
-    println!("Removed profile: {name}");
-    println!("Directory preserved: {}", config_dir.display());
+    println!("Removed profile: {}", name.green());
+    println!("Directory preserved: {}", config_dir.display().to_string().green());
     Ok(())
 }
 
@@ -178,20 +179,20 @@ pub fn list() -> Result<(), CyoloError> {
     let cfg = CyoloConfig::load()?;
 
     if cfg.profiles.is_empty() {
-        println!("No profiles registered. Run: cyolo profile add <name>");
+        println!("No profiles registered. {}", "Run: cyolo profile add <name>".dimmed());
         return Ok(());
     }
 
     let max_width = cfg.profiles.keys().map(|k| k.len()).max().unwrap_or(0);
 
     for (name, profile) in &cfg.profiles {
-        let marker = if cfg.default.as_deref() == Some(name.as_str()) {
-            "* "
-        } else {
-            "  "
-        };
+        let padded = format!("{name:<max_width$}");
         let dir = profile.config_dir.display();
-        println!("{marker}{name:<max_width$} -> {dir}");
+        if cfg.default.as_deref() == Some(name.as_str()) {
+            println!("{} {} -> {}", "*".green().bold(), padded.bold(), dir);
+        } else {
+            println!("  {} -> {}", padded.bold(), dir);
+        }
     }
 
     Ok(())
@@ -204,7 +205,7 @@ pub fn list() -> Result<(), CyoloError> {
 /// Usage: `cyolo profile link <name>`
 pub fn link(args: &[String]) -> Result<(), CyoloError> {
     if args.len() != 1 {
-        eprintln!("Usage: cyolo profile link <name>");
+        eprintln!("{} cyolo profile link <name>", "Usage:".yellow().bold());
         return Err(CyoloError::NonZeroExit(1));
     }
     let name = &args[0];
@@ -223,7 +224,7 @@ pub fn link(args: &[String]) -> Result<(), CyoloError> {
 
     symlink::create_shared_symlinks(&config_dir)?;
 
-    println!("Symlinks updated for profile '{name}'");
+    println!("Symlinks updated for profile '{}'", name.green());
     Ok(())
 }
 
@@ -235,20 +236,20 @@ pub fn link(args: &[String]) -> Result<(), CyoloError> {
 /// Usage: `cyolo profile current`
 pub fn current(args: &[String]) -> Result<(), CyoloError> {
     if !args.is_empty() {
-        eprintln!("Usage: cyolo profile current");
+        eprintln!("{} cyolo profile current", "Usage:".yellow().bold());
         return Err(CyoloError::NonZeroExit(1));
     }
     let resolved = crate::detect::resolve_profile()?;
     match resolved {
         Some(profile) => {
             if let Some(name) = &profile.name {
-                println!("profile: {name}");
+                println!("{} {}", "profile:".bold(), name.green());
             }
-            println!("config_dir: {}", profile.config_dir.display());
-            println!("source: {}", profile.source);
+            println!("{} {}", "config_dir:".bold(), profile.config_dir.display().to_string().green());
+            println!("{} {}", "source:".bold(), profile.source.green());
         }
         None => {
-            println!("No profile detected. Using default Claude configuration (~/.claude).");
+            println!("{}", "No profile detected. Using default Claude configuration (~/.claude).".dimmed());
         }
     }
     Ok(())
@@ -268,8 +269,8 @@ pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
         0 => {
             let cfg = CyoloConfig::load()?;
             match &cfg.default {
-                Some(name) => println!("Default profile: {name}"),
-                None => println!("No default profile set."),
+                Some(name) => println!("Default profile: {}", name.green()),
+                None => println!("{}", "No default profile set.".dimmed()),
             }
             Ok(())
         }
@@ -288,12 +289,12 @@ pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
                 }
                 cfg.default = Some(name.clone());
                 cfg.save()?;
-                println!("Default profile set to: {name}");
+                println!("Default profile set to: {}", name.green());
                 Ok(())
             }
         }
         _ => {
-            eprintln!("Usage: cyolo profile default [name | --unset]");
+            eprintln!("{} cyolo profile default [name | --unset]", "Usage:".yellow().bold());
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -315,14 +316,14 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
         0 => match &cfg.default {
             Some(default_name) => default_name.clone(),
             None => {
-                eprintln!("No profile name given and no default profile set.");
-                eprintln!("Usage: cyolo profile init <name>");
+                eprintln!("{} no profile name given and no default profile set", "error:".red().bold());
+                eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
                 return Err(CyoloError::NonZeroExit(1));
             }
         },
         1 => args[0].clone(),
         _ => {
-            eprintln!("Usage: cyolo profile init <name>");
+            eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
             return Err(CyoloError::NonZeroExit(1));
         }
     };
@@ -342,7 +343,8 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
     // Use symlink_metadata to detect broken symlinks (exists() returns false for them)
     if std::fs::symlink_metadata(&profile_path).is_ok() {
         eprintln!(
-            "cyolo: .claude-profile.json already exists in {}",
+            "{} .claude-profile.json already exists in {}",
+            "error:".red().bold(),
             cwd.display()
         );
         return Err(CyoloError::NonZeroExit(1));
@@ -366,7 +368,7 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
             source: e,
         })?;
 
-    println!("Created .claude-profile.json (profile: {name})");
+    println!("Created {} (profile: {})", ".claude-profile.json".green(), name.green());
     Ok(())
 }
 

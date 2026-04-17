@@ -17,7 +17,7 @@ owo-colors. Apply consistent color conventions:
 - Success key-value output → values in green
 - Profile list → active marker (*) in green bold, profile names in bold
 - Suggestion/hint text → dimmed""",
-    status="pending",
+    status="completed",
     agent="meta-agent",
     skills=[],
     mcp_tools=[],
