@@ -1,7 +1,7 @@
 {
   "workflow": "evo-pro",
   "roadmap": "prd/version-roadmap.json",
-  "currentVersion": "v4",
+  "currentVersion": "v7",
   "versions": [
     {
       "version": "v1",
@@ -27,14 +27,35 @@
     {
       "version": "v4",
       "created": "2026-04-17",
-      "status": "active",
-      "folder": "v4",
+      "status": "completed",
+      "folder": "@v4",
       "description": "Profile Detection & Walk-up"
+    },
+    {
+      "version": "v5",
+      "created": "2026-04-17",
+      "status": "completed",
+      "folder": "@v5",
+      "description": "Profile Init & Default Management"
+    },
+    {
+      "version": "v6",
+      "created": "2026-04-17",
+      "status": "completed",
+      "folder": "@v6",
+      "description": "Diet: Orphaned Project Cleanup"
+    },
+    {
+      "version": "v7",
+      "created": "2026-04-17",
+      "status": "active",
+      "folder": "v7",
+      "description": "Diet: Safety & Atomic Operations"
     }
   ],
   "activeFiles": {
-    "wants": "prd/v4/wants.txt",
-    "prd": "prd/v4/prd.txt"
+    "wants": "prd/v7/wants.txt",
+    "prd": "prd/v7/prd.txt"
   },
   "folderNamingRules": {
     "active": "v{version}",
