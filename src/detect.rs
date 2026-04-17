@@ -172,16 +172,15 @@ pub fn resolve_profile() -> Result<Option<ResolvedProfile>, CyoloError> {
     let found = find_profile_file()?;
 
     // config_dir-only walk-up doesn't need the global config
-    if let Some((ref path, ref pf)) = found {
-        if pf.name.is_none() {
-            if let Some(ref dir) = pf.config_dir {
-                return Ok(Some(ResolvedProfile {
-                    name: None,
-                    config_dir: expand_tilde(dir),
-                    source: path.display().to_string(),
-                }));
-            }
-        }
+    if let Some((ref path, ref pf)) = found
+        && pf.name.is_none()
+        && let Some(ref dir) = pf.config_dir
+    {
+        return Ok(Some(ResolvedProfile {
+            name: None,
+            config_dir: expand_tilde(dir),
+            source: path.display().to_string(),
+        }));
     }
 
     // Name lookup or default fallback — needs config
