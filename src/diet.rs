@@ -576,6 +576,79 @@ pub(crate) fn apply(
     Ok(())
 }
 
+/// Parse CLI arguments for the `diet` subcommand.
+///
+/// No args → dry-run (`DietOptions { apply: false }`).
+/// `--apply` → execute cleanup (`DietOptions { apply: true }`).
+/// Unknown args → error with usage message.
+fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
+    let mut apply = false;
+    for arg in args {
+        match arg.as_str() {
+            "--apply" => apply = true,
+            _ => {
+                eprintln!("cyolo: unknown diet option '{arg}'");
+                eprintln!("Usage: cyolo diet [--apply]");
+                return Err(CyoloError::NonZeroExit(1));
+            }
+        }
+    }
+    Ok(DietOptions { apply })
+}
+
+/// Resolve the user's home directory and Claude home directory (`~/.claude`).
+///
+/// Returns `(home_dir, claude_home)`.
+fn resolve_claude_home() -> Result<(PathBuf, PathBuf), CyoloError> {
+    let home = dirs::home_dir().ok_or_else(|| CyoloError::ConfigIoError {
+        context: "could not determine home directory".into(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found"),
+    })?;
+    let claude_home = home.join(".claude");
+    Ok((home, claude_home))
+}
+
+/// Entry point for the `diet` subcommand.
+///
+/// Orchestrates the full pipeline: parse args → analyze → scan → report → apply.
+pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
+    let options = parse_diet_args(args)?;
+
+    let (home, claude_home) = resolve_claude_home()?;
+    let claude_json_path = home.join(".claude.json");
+    let projects_dir = claude_home.join("projects");
+
+    let mut analysis = analyze_claude_json(&claude_json_path)?;
+
+    let orphaned_paths: Vec<String> = analysis
+        .orphaned_projects
+        .iter()
+        .map(|p| p.path.clone())
+        .collect();
+    let (sessions, session_dir_total_size) =
+        scan_session_folders(&projects_dir, &orphaned_paths);
+
+    let report = DietReport {
+        orphaned_projects: analysis.orphaned_projects,
+        orphaned_sessions: sessions,
+        active_project_count: analysis.active_count,
+        config_file_size: analysis.config_file_size,
+        session_dir_total_size,
+        claude_home,
+    };
+
+    // Always show the dry-run report first; show "Cleanup complete." only after
+    // apply() succeeds so a failed cleanup never prints a success footer.
+    print_report(&report, false);
+
+    if options.apply {
+        apply(&report, &mut analysis.parsed_json, &claude_json_path)?;
+        println!("Cleanup complete.");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,6 +1328,60 @@ mod tests {
 
         // The symlinked session folder should NOT be included
         assert!(sessions.is_empty());
+    }
+
+    // ── parse_diet_args tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_args_empty() {
+        let result = parse_diet_args(&[]).unwrap();
+        assert!(!result.apply);
+    }
+
+    #[test]
+    fn test_parse_args_apply() {
+        let args = vec!["--apply".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.apply);
+    }
+
+    #[test]
+    fn test_parse_args_unknown_flag() {
+        let args = vec!["--force".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_unknown_positional() {
+        let args = vec!["cleanup".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_unknown_before_apply() {
+        // First unknown arg should cause immediate error, even if --apply follows
+        let args = vec!["--verbose".to_string(), "--apply".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_apply_then_unknown() {
+        // --apply followed by unknown should still fail (validate all args)
+        let args = vec!["--apply".to_string(), "--unknown".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    // ── dispatch error tests ──────────────────────────────────
+
+    #[test]
+    fn test_dispatch_unknown_arg_returns_error() {
+        let args = vec!["--unknown".to_string()];
+        let result = dispatch(&args);
+        assert!(result.is_err());
     }
 
     #[test]
