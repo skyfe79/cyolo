@@ -78,25 +78,6 @@ pub fn run_claude_login(config_dir: &Path) -> Result<(), CyoloError> {
     }
 }
 
-/// Run `claude update`.
-/// No `--dangerously-skip-permissions` flag.
-pub fn run_update() -> Result<(), CyoloError> {
-    let claude = find_claude()?;
-    let status = Command::new(&claude)
-        .arg("update")
-        .status()
-        .map_err(|e| CyoloError::ClaudeExecFailed {
-            path: claude.clone(),
-            source: e,
-        })?;
-
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(code) => Err(CyoloError::NonZeroExit(code)),
-        None => Err(CyoloError::NonZeroExit(1)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
