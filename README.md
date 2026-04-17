@@ -4,9 +4,9 @@ Multi-account profile manager and config cleaner for Claude Code.
 
 ## Motivation
 
-- You juggle multiple Claude Code accounts (personal, work, clients) and
-  switching means logging out, logging in, or remembering to export
-  `CLAUDE_CONFIG_DIR` every shell.
+- You juggle multiple Claude Code accounts (personal, work, clients). A
+  naive setup means `/logout` + `/login` every time you switch, or
+  remembering to export `CLAUDE_CONFIG_DIR` in every shell.
 - Each new profile directory would otherwise need its own copy of the things
   you set up once — `CLAUDE.md`, `settings.json`, `commands/`, `skills/`,
   `agents/` — so npm-installed skills and shared prompts drift out of sync.
@@ -14,9 +14,16 @@ Multi-account profile manager and config cleaner for Claude Code.
   `projects` map; `~/.claude/projects/<encoded-path>/` keeps their session
   history; multi-megabyte configs slow Claude Code startup for no reason.
 
-`cyolo` solves all three: per-folder profile auto-detection, symlink-based
-sharing of the six common config items, and a `diet` command that reports
-and (on `--apply`) reclaims the orphaned data.
+`cyolo` solves all three:
+
+- **Multi-account OAuth**: each profile's token lands in its own macOS
+  Keychain entry (Claude Code hashes `CLAUDE_CONFIG_DIR` into the service
+  name). Log in once per account; switch profiles with zero re-auth.
+- **Shared settings**: per-folder `.claude-profile.json` auto-detection via
+  walk-up, plus symlinks for the six common config items so plugins and
+  prompts stay consistent across accounts.
+- **`diet` cleanup**: reports orphaned project records, stale session
+  folders, and cache cruft; `--apply` reclaims the space.
 
 ## Installation
 
@@ -169,12 +176,15 @@ preserved — delete it yourself with `rm -rf ~/.claude-<name>` if needed.
 cyolo profile list
 ```
 
-Tabulate all registered profiles. The default is marked `*`.
+Tabulate all registered profiles. The default is marked `*`. Each row also
+shows the email address stored in that profile's `.claude.json`, or
+`(needs login)` when the profile has no token yet (run
+`cyolo profile login <name>` to fix).
 
 ```
-* personal → /Users/codingmax/.claude
-  work     → /Users/codingmax/.claude-work
-  client   → /Users/codingmax/.claude-client-a
+* personal -> /Users/codingmax/.claude            skyfe79@gmail.com
+  work     -> /Users/codingmax/.claude-work       work@example.com
+  client   -> /Users/codingmax/.claude-client-a   (needs login)
 ```
 
 ### default
