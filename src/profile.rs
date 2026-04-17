@@ -394,4 +394,43 @@ mod tests {
         let result = current(&args(&["unexpected"]));
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_dispatch_no_args_shows_help() {
+        let result = dispatch(&args(&[]));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_routes_to_default() {
+        // "default" with 0 extra args calls profile_default(&[]), which
+        // prints the current default (or "No default profile set.") and
+        // returns Ok. The unknown-command catch-all returns Err, so Ok
+        // proves the routing.
+        let result = dispatch(&args(&["default"]));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_routes_to_init() {
+        // "init" with an unregistered name returns ProfileNotFound (contains
+        // "not found"), not the NonZeroExit(1) from the unknown-command
+        // catch-all (which contains "unknown profile command").
+        let result = dispatch(&args(&["init", "__test_no_such_profile__"]));
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not found"), "expected ProfileNotFound, got: {msg}");
+    }
+
+    #[test]
+    fn test_profile_default_too_many_args() {
+        let result = profile_default(&args(&["a", "b"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_profile_init_too_many_args() {
+        let result = profile_init(&args(&["a", "b"]));
+        assert!(result.is_err());
+    }
 }
