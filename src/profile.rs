@@ -389,6 +389,15 @@ pub(crate) fn expand_tilde(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    // Disable ANSI color output once per test binary so eprintln!/println!
+    // calls from tested code don't pollute captured output or break any
+    // future assertions on stderr/stdout strings.
+    static INIT_COLORS: Once = Once::new();
+    fn setup() {
+        INIT_COLORS.call_once(|| owo_colors::set_override(false));
+    }
 
     fn args(strs: &[&str]) -> Vec<String> {
         strs.iter().map(|s| s.to_string()).collect()
@@ -396,18 +405,21 @@ mod tests {
 
     #[test]
     fn test_dispatch_unknown_subcommand_returns_error() {
+        setup();
         let result = dispatch(&args(&["unknown"]));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_current_rejects_extra_args() {
+        setup();
         let result = current(&args(&["unexpected"]));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_dispatch_no_args_shows_help() {
+        setup();
         let result = dispatch(&args(&[]));
         assert!(result.is_ok());
     }
@@ -418,6 +430,7 @@ mod tests {
         // prints the current default (or "No default profile set.") and
         // returns Ok. The unknown-command catch-all returns Err, so Ok
         // proves the routing.
+        setup();
         let result = dispatch(&args(&["default"]));
         assert!(result.is_ok());
     }
@@ -427,6 +440,7 @@ mod tests {
         // "init" with an unregistered name returns ProfileNotFound (contains
         // "not found"), not the NonZeroExit(1) from the unknown-command
         // catch-all (which contains "unknown profile command").
+        setup();
         let result = dispatch(&args(&["init", "__test_no_such_profile__"]));
         let err = result.unwrap_err();
         let msg = err.to_string();
@@ -435,12 +449,14 @@ mod tests {
 
     #[test]
     fn test_profile_default_too_many_args() {
+        setup();
         let result = profile_default(&args(&["a", "b"]));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_profile_init_too_many_args() {
+        setup();
         let result = profile_init(&args(&["a", "b"]));
         assert!(result.is_err());
     }

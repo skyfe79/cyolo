@@ -1417,7 +1417,16 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Once;
     use tempfile::TempDir;
+
+    // Disable ANSI color output once per test binary so tests exercising
+    // parse_diet_args/dispatch/build_report_string don't emit ANSI codes
+    // into captured stderr/stdout.
+    static INIT_COLORS: Once = Once::new();
+    fn setup() {
+        INIT_COLORS.call_once(|| owo_colors::set_override(false));
+    }
 
     /// Helper: write a string to a file inside a temp dir.
     fn write_claude_json(dir: &TempDir, content: &str) -> PathBuf {
@@ -1745,6 +1754,7 @@ mod tests {
 
     #[test]
     fn test_report_no_orphans() {
+        setup();
         let report = make_report(&[], vec![], 3);
         let output = build_report_string(&report, false);
         assert!(output.contains("No orphaned projects found. Nothing to clean up."));
@@ -1756,6 +1766,7 @@ mod tests {
 
     #[test]
     fn test_report_one_orphan() {
+        setup();
         let report = make_report(
             &[("/fakehome/projects/deleted", 1024)],
             vec![],
@@ -1774,6 +1785,7 @@ mod tests {
 
     #[test]
     fn test_report_five_orphans() {
+        setup();
         let paths: Vec<(&str, u64)> = (1..=5)
             .map(|i| {
                 // Use a static slice for the path strings
@@ -1801,6 +1813,7 @@ mod tests {
 
     #[test]
     fn test_report_ten_orphans() {
+        setup();
         let path_strings: Vec<String> = (1..=10)
             .map(|i| format!("/fakehome/projects/p{i:02}"))
             .collect();
@@ -1823,6 +1836,7 @@ mod tests {
 
     #[test]
     fn test_report_applied_footer() {
+        setup();
         let report = make_report(
             &[("/fakehome/projects/x", 512)],
             vec![],
@@ -1835,6 +1849,7 @@ mod tests {
 
     #[test]
     fn test_report_dry_run_footer() {
+        setup();
         let report = make_report(
             &[("/fakehome/projects/x", 512)],
             vec![],
@@ -1847,6 +1862,7 @@ mod tests {
 
     #[test]
     fn test_report_with_orphaned_sessions() {
+        setup();
         let sessions = vec![OrphanedSession {
             folder_path: PathBuf::from("/fakehome/.claude/projects/-fakehome-projects-x"),
             total_size: 5000,
@@ -3166,6 +3182,7 @@ mod tests {
 
     #[test]
     fn test_report_with_stale_projects() {
+        setup();
         let stale = vec![
             StaleProject {
                 path: "/fakehome/work/old-client".to_string(),
@@ -3193,6 +3210,7 @@ mod tests {
 
     #[test]
     fn test_report_with_cache_dirs() {
+        setup();
         let caches = vec![
             CacheDir {
                 name: "statsig".to_string(),
@@ -3216,6 +3234,7 @@ mod tests {
 
     #[test]
     fn test_report_stale_and_cache() {
+        setup();
         let stale = vec![StaleProject {
             path: "/fakehome/old".to_string(),
             last_activity_secs: 100 * 86400,
@@ -3237,6 +3256,7 @@ mod tests {
 
     #[test]
     fn test_report_total_reclaimable_all() {
+        setup();
         let stale = vec![StaleProject {
             path: "/fakehome/stale".to_string(),
             last_activity_secs: 200 * 86400,
@@ -3269,6 +3289,7 @@ mod tests {
 
     #[test]
     fn test_report_nothing_to_clean_all_empty() {
+        setup();
         let report = make_report_full(&[], vec![], vec![], vec![], 5);
         let output = build_report_string(&report, false);
 
@@ -3279,6 +3300,7 @@ mod tests {
 
     #[test]
     fn test_report_days_ago_format() {
+        setup();
         let stale = vec![StaleProject {
             path: "/fakehome/old-proj".to_string(),
             last_activity_secs: 45 * 86400, // 45 days
