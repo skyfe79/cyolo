@@ -295,6 +295,68 @@ pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
     }
 }
 
+/// Create `.claude-profile.json` in the current working directory.
+///
+/// Resolves the profile name from the first positional argument, or
+/// falls back to `config.default`.  Validates that the name is
+/// registered before writing.  Refuses to overwrite an existing file.
+///
+/// Usage: `cyolo profile init [name]`
+pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
+    config::ensure_dir()?;
+    let cfg = CyoloConfig::load()?;
+
+    // Resolve profile name
+    let name = match args.len() {
+        0 => match &cfg.default {
+            Some(default_name) => default_name.clone(),
+            None => {
+                eprintln!("No profile name given and no default profile set.");
+                eprintln!("Usage: cyolo profile init <name>");
+                return Err(CyoloError::NonZeroExit(1));
+            }
+        },
+        1 => args[0].clone(),
+        _ => {
+            eprintln!("Usage: cyolo profile init <name>");
+            return Err(CyoloError::NonZeroExit(1));
+        }
+    };
+
+    // Validate the name exists in config.profiles
+    if !cfg.profiles.contains_key(&name) {
+        return Err(CyoloError::ProfileNotFound { name });
+    }
+
+    // Check if .claude-profile.json already exists in cwd
+    let cwd = std::env::current_dir().map_err(|e| CyoloError::ConfigIoError {
+        context: "could not determine current directory".into(),
+        source: e,
+    })?;
+    let profile_path = cwd.join(".claude-profile.json");
+
+    if profile_path.exists() {
+        eprintln!(
+            "cyolo: .claude-profile.json already exists in {}",
+            cwd.display()
+        );
+        return Err(CyoloError::NonZeroExit(1));
+    }
+
+    // Write the file
+    let contents = serde_json::to_string_pretty(&serde_json::json!({"name": name}))
+        .expect("JSON serialization of simple object cannot fail");
+    std::fs::write(&profile_path, format!("{contents}\n")).map_err(|e| {
+        CyoloError::ConfigIoError {
+            context: format!("failed to write {}", profile_path.display()),
+            source: e,
+        }
+    })?;
+
+    println!("Created .claude-profile.json (profile: {name})");
+    Ok(())
+}
+
 /// Expand leading `~` or `~/` to the user's home directory.
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
