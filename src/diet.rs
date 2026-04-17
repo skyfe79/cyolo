@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::CyoloConfig;
 use crate::error::CyoloError;
+use crate::profile::expand_tilde;
 
 /// Detect whether a Claude Code process is currently running.
 ///
@@ -1038,6 +1040,55 @@ fn resolve_claude_home() -> Result<(PathBuf, PathBuf), CyoloError> {
     })?;
     let claude_home = home.join(".claude");
     Ok((home, claude_home))
+}
+
+/// Determine which profile(s) to target based on CLI flags.
+///
+/// Returns a list of `(display_name, claude_home_path)` tuples:
+/// - `--profile <name>`: single named profile from `~/.cyolo/config.json`.
+/// - `--all`: every registered profile.
+/// - Neither: the current profile via `resolve_claude_home()`.
+pub(crate) fn resolve_target_profiles(
+    options: &DietOptions,
+) -> Result<Vec<(String, PathBuf)>, CyoloError> {
+    if options.profile.is_some() || options.all {
+        let cfg = CyoloConfig::load()?;
+        return resolve_profiles_from_config(options, cfg);
+    }
+
+    // Default: current profile detection via resolve_claude_home().
+    let (_home, claude_home) = resolve_claude_home()?;
+    let display = tilde_path(&claude_home.to_string_lossy());
+    Ok(vec![(display, claude_home)])
+}
+
+/// Core profile resolution logic, separated for testability.
+fn resolve_profiles_from_config(
+    options: &DietOptions,
+    cfg: CyoloConfig,
+) -> Result<Vec<(String, PathBuf)>, CyoloError> {
+    if let Some(ref name) = options.profile {
+        let profile = cfg.profiles.get(name).ok_or_else(|| {
+            CyoloError::ProfileNotFound { name: name.clone() }
+        })?;
+        let dir = expand_tilde(&profile.config_dir.to_string_lossy());
+        return Ok(vec![(name.clone(), dir)]);
+    }
+
+    // options.all
+    if cfg.profiles.is_empty() {
+        eprintln!("cyolo: no profiles registered. Run: cyolo profile add <name>");
+        return Err(CyoloError::NonZeroExit(1));
+    }
+    let entries: Vec<(String, PathBuf)> = cfg
+        .profiles
+        .into_iter()
+        .map(|(name, profile)| {
+            let dir = expand_tilde(&profile.config_dir.to_string_lossy());
+            (name, dir)
+        })
+        .collect();
+    Ok(entries)
 }
 
 /// Entry point for the `diet` subcommand.
@@ -2524,5 +2575,170 @@ mod tests {
         assert!(c2_path.exists());
         assert!(fs::read_dir(&c1_path).unwrap().count() == 0);
         assert!(fs::read_dir(&c2_path).unwrap().count() == 0);
+    }
+
+    // ── resolve_target_profiles tests ──────────────────────────────
+
+    #[test]
+    fn test_resolve_default_no_flags() {
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: None,
+            all: false,
+        };
+
+        let result = resolve_target_profiles(&options).unwrap();
+
+        assert_eq!(result.len(), 1);
+        let (display_name, path) = &result[0];
+        // Default path should be ~/.claude
+        assert!(path.ends_with(".claude"));
+        // Display name should use tilde contraction
+        assert!(display_name.starts_with("~"), "expected tilde path, got: {display_name}");
+    }
+
+    #[test]
+    fn test_resolve_profile_not_found() {
+        use crate::config::Profile;
+        use std::collections::BTreeMap;
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert("work".to_string(), Profile {
+            name: "work".to_string(),
+            config_dir: PathBuf::from("/home/user/.claude-work"),
+        });
+        let cfg = CyoloConfig { default: None, profiles };
+
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: Some("nonexistent".to_string()),
+            all: false,
+        };
+
+        let result = resolve_profiles_from_config(&options, cfg);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not found"),
+            "expected 'not found' in error, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_profile_found() {
+        use crate::config::Profile;
+        use std::collections::BTreeMap;
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert("work".to_string(), Profile {
+            name: "work".to_string(),
+            config_dir: PathBuf::from("/home/user/.claude-work"),
+        });
+        let cfg = CyoloConfig { default: None, profiles };
+
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: Some("work".to_string()),
+            all: false,
+        };
+
+        let result = resolve_profiles_from_config(&options, cfg).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "work");
+        assert_eq!(result[0].1, PathBuf::from("/home/user/.claude-work"));
+    }
+
+    #[test]
+    fn test_resolve_all_with_profiles() {
+        use crate::config::Profile;
+        use std::collections::BTreeMap;
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert("main".to_string(), Profile {
+            name: "main".to_string(),
+            config_dir: PathBuf::from("/home/user/.claude"),
+        });
+        profiles.insert("work".to_string(), Profile {
+            name: "work".to_string(),
+            config_dir: PathBuf::from("/home/user/.claude-work"),
+        });
+        let cfg = CyoloConfig { default: None, profiles };
+
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: None,
+            all: true,
+        };
+
+        let result = resolve_profiles_from_config(&options, cfg).unwrap();
+
+        // BTreeMap is sorted by key, so "main" comes before "work"
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, "main");
+        assert_eq!(result[1].0, "work");
+    }
+
+    #[test]
+    fn test_resolve_all_no_profiles() {
+        use std::collections::BTreeMap;
+        let cfg = CyoloConfig { default: None, profiles: BTreeMap::new() };
+
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: None,
+            all: true,
+        };
+
+        let result = resolve_profiles_from_config(&options, cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_profile_tilde_expansion() {
+        use crate::config::Profile;
+        use std::collections::BTreeMap;
+
+        let mut profiles = BTreeMap::new();
+        profiles.insert("custom".to_string(), Profile {
+            name: "custom".to_string(),
+            config_dir: PathBuf::from("~/.claude-custom"),
+        });
+        let cfg = CyoloConfig { default: None, profiles };
+
+        let options = DietOptions {
+            apply: false,
+            force: false,
+            stale_days: None,
+            cache: false,
+            profile: Some("custom".to_string()),
+            all: false,
+        };
+
+        let result = resolve_profiles_from_config(&options, cfg).unwrap();
+
+        assert_eq!(result.len(), 1);
+        // Should NOT start with ~ (tilde should be expanded)
+        assert!(
+            !result[0].1.to_string_lossy().starts_with('~'),
+            "expected expanded path, got: {}",
+            result[0].1.display()
+        );
     }
 }
