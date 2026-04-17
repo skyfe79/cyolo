@@ -733,6 +733,11 @@ fn resolve_claude_home() -> Result<(PathBuf, PathBuf), CyoloError> {
 pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     let options = parse_diet_args(args)?;
 
+    if !options.force && is_claude_running() {
+        eprintln!("cyolo: Claude is currently running. Stop Claude first, or use --force to proceed.");
+        return Err(CyoloError::NonZeroExit(1));
+    }
+
     let (home, claude_home) = resolve_claude_home()?;
     let claude_json_path = home.join(".claude.json");
     let projects_dir = claude_home.join("projects");
