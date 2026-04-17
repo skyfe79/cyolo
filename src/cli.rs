@@ -33,7 +33,7 @@ pub fn route() -> Result<(), CyoloError> {
         Command::Update => runner::run_update(),
         Command::Profile(args) => profile::dispatch(&args),
         Command::Diet(_) => Err(CyoloError::NotImplemented("diet".into())),
-        Command::Claude(args) => runner::run_claude(&args),
+        Command::Claude(args) => runner::run_claude(&args, None),
     }
 }
 
