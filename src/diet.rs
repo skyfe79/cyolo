@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::CyoloConfig;
 use crate::error::CyoloError;
 use crate::profile::expand_tilde;
+use owo_colors::OwoColorize;
 
 /// Detect whether a Claude Code process is currently running.
 ///
@@ -335,7 +336,8 @@ fn newest_mtime(dir: &Path) -> Option<SystemTime> {
                     }
                     Err(e) => {
                         eprintln!(
-                            "warning: could not read mtime for {}: {}",
+                            "{} could not read mtime for {}: {}",
+                            "warning:".yellow().bold(),
                             entry_path.display(),
                             e
                         );
@@ -465,7 +467,8 @@ pub(crate) fn remove_cache_contents(
             Ok(meta) if meta.is_dir() => {}
             _ => {
                 eprintln!(
-                    "warning: cache directory {} is no longer a real directory, skipping",
+                    "{} cache directory {} is no longer a real directory, skipping",
+                    "warning:".yellow().bold(),
                     cache.path.display()
                 );
                 continue;
@@ -476,7 +479,8 @@ pub(crate) fn remove_cache_contents(
             Ok(entries) => entries,
             Err(e) => {
                 eprintln!(
-                    "warning: could not read cache directory {}: {}",
+                    "{} could not read cache directory {}: {}",
+                    "warning:".yellow().bold(),
                     cache.path.display(),
                     e
                 );
@@ -489,7 +493,8 @@ pub(crate) fn remove_cache_contents(
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!(
-                        "warning: could not read entry in {}: {}",
+                        "{} could not read entry in {}: {}",
+                        "warning:".yellow().bold(),
                         cache.path.display(),
                         e
                     );
@@ -501,7 +506,8 @@ pub(crate) fn remove_cache_contents(
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!(
-                        "warning: could not stat {}: {}",
+                        "{} could not stat {}: {}",
+                        "warning:".yellow().bold(),
                         entry_path.display(),
                         e
                     );
@@ -517,7 +523,8 @@ pub(crate) fn remove_cache_contents(
 
             if let Err(e) = result {
                 eprintln!(
-                    "warning: failed to remove {}: {}",
+                    "{} failed to remove {}: {}",
+                    "warning:".yellow().bold(),
                     entry_path.display(),
                     e
                 );
@@ -562,26 +569,32 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
         && report.cache_dirs.is_empty()
     {
         return format!(
-            "cyolo diet — analyzing {claude_home_display}\n\n\
-             No orphaned projects found. Nothing to clean up.\n"
+            "{}\n\nNo orphaned projects found. Nothing to clean up.\n",
+            format!("cyolo diet — analyzing {claude_home_display}").bold()
         );
     }
 
     let mut buf = String::new();
 
     // Header
-    writeln!(buf, "cyolo diet — analyzing {claude_home_display}").unwrap();
+    writeln!(
+        buf,
+        "{}",
+        format!("cyolo diet — analyzing {claude_home_display}").bold()
+    )
+    .unwrap();
     writeln!(buf).unwrap();
 
     // ── ~/.claude.json section ──────────────────────────────────
     let claude_json_display = format!("{claude_home_display}.json");
     let orphan_total_size: u64 = report.orphaned_projects.iter().map(|o| o.entry_size).sum();
 
+    let claude_json_label = format!("{:<45}", format!("{claude_json_display}:"));
     writeln!(
         buf,
-        "{:<45} {}",
-        format!("{claude_json_display}:"),
-        format_size(report.config_file_size)
+        "{} {}",
+        claude_json_label.bold(),
+        format_size(report.config_file_size).cyan()
     )
     .unwrap();
 
@@ -590,9 +603,11 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
     // Orphaned projects line (always shown)
     writeln!(
         buf,
-        "  ├─ {:<41} {}  (removable)",
+        "  {} {:<41} {}  {}",
+        "├─".dimmed(),
         format!("orphaned projects ({orphan_count}):"),
-        format_size(orphan_total_size)
+        format_size(orphan_total_size).cyan(),
+        "(removable)".green()
     )
     .unwrap();
 
@@ -604,16 +619,20 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
             let item_char = if is_last { "└─" } else { "├─" };
             writeln!(
                 buf,
-                "  │   {item_char} {:<37} {}",
+                "  {}   {} {:<37} {}",
+                "│".dimmed(),
+                item_char.dimmed(),
                 tilde_path(&orphan.path),
-                format_size(orphan.entry_size)
+                format_size(orphan.entry_size).cyan()
             )
             .unwrap();
         }
         if orphan_count > 5 {
             writeln!(
                 buf,
-                "  │   └─ ... {} more",
+                "  {}   {} ... {} more",
+                "│".dimmed(),
+                "└─".dimmed(),
                 orphan_count - 5
             )
             .unwrap();
@@ -624,9 +643,11 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
     let active_size = report.config_file_size.saturating_sub(orphan_total_size);
     writeln!(
         buf,
-        "  └─ {:<41} {}  (keep)",
+        "  {} {:<41} {}  {}",
+        "└─".dimmed(),
         format!("active projects ({}):", report.active_project_count),
-        format_size(active_size)
+        format_size(active_size).cyan(),
+        "(keep)".dimmed()
     )
     .unwrap();
 
@@ -637,11 +658,13 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
         let stale_count = report.stale_projects.len();
         let stale_history_total: u64 = report.stale_projects.iter().map(|s| s.history_size).sum();
 
+        let stale_header = format!("{:<45}", format!("stale projects ({stale_count}):"));
         writeln!(
             buf,
-            "{:<45} {}  (history clearable)",
-            format!("stale projects ({stale_count}):"),
-            format_size(stale_history_total)
+            "{} {}  {}",
+            stale_header.bold(),
+            format_size(stale_history_total).cyan(),
+            "(history clearable)".yellow()
         )
         .unwrap();
 
@@ -651,10 +674,11 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
             let days = stale.last_activity_secs / 86400;
             writeln!(
                 buf,
-                "  {item_char} {:<30} last activity: {} days ago     {}",
+                "  {} {:<30} last activity: {} days ago     {}",
+                item_char.dimmed(),
                 tilde_path(&stale.path),
                 days,
-                format_size(stale.history_size)
+                format_size(stale.history_size).cyan()
             )
             .unwrap();
         }
@@ -663,11 +687,12 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
     }
 
     // ── ~/.claude/projects/ section ─────────────────────────────
+    let projects_header = format!("{:<45}", format!("{claude_home_display}/projects/:"));
     writeln!(
         buf,
-        "{:<45} {}",
-        format!("{claude_home_display}/projects/:"),
-        format_size(report.session_dir_total_size)
+        "{} {}",
+        projects_header.bold(),
+        format_size(report.session_dir_total_size).cyan()
     )
     .unwrap();
 
@@ -676,9 +701,11 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
     // Always show orphaned session folders line
     writeln!(
         buf,
-        "  └─ {:<41} {}  (removable)",
+        "  {} {:<41} {}  {}",
+        "└─".dimmed(),
         format!("orphaned session folders ({session_count}):"),
-        format_size(session_total_size)
+        format_size(session_total_size).cyan(),
+        "(removable)".green()
     )
     .unwrap();
 
@@ -689,19 +716,22 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
         let cache_total: u64 = report.cache_dirs.iter().map(|c| c.size).sum();
         let cache_count = report.cache_dirs.len();
 
+        let cache_header = format!("{:<45}", format!("{claude_home_display}/cache:"));
         writeln!(
             buf,
-            "{:<45} {}",
-            format!("{claude_home_display}/cache:"),
-            format_size(cache_total)
+            "{} {}",
+            cache_header.bold(),
+            format_size(cache_total).cyan()
         )
         .unwrap();
 
         writeln!(
             buf,
-            "  └─ {:<41} {}  (removable)",
+            "  {} {:<41} {}  {}",
+            "└─".dimmed(),
             format!("clearable cache dirs ({cache_count}):"),
-            format_size(cache_total)
+            format_size(cache_total).cyan(),
+            "(removable)".green()
         )
         .unwrap();
 
@@ -710,9 +740,10 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
             let item_char = if is_last { "└─" } else { "├─" };
             writeln!(
                 buf,
-                "      {item_char} {:<37} {}",
+                "      {} {:<37} {}",
+                item_char.dimmed(),
                 format!("{}/", cache.name),
-                format_size(cache.size)
+                format_size(cache.size).cyan()
             )
             .unwrap();
         }
@@ -726,7 +757,13 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
     let cache_total: u64 = report.cache_dirs.iter().map(|c| c.size).sum();
     let total_reclaimable =
         orphan_total_size + session_total_size + stale_history_total + stale_session_total + cache_total;
-    writeln!(buf, "Total reclaimable: {}", format_size(total_reclaimable)).unwrap();
+    writeln!(
+        buf,
+        "{} {}",
+        "Total reclaimable:".bold(),
+        format_size(total_reclaimable).cyan()
+    )
+    .unwrap();
     writeln!(buf).unwrap();
 
     // Footer
@@ -845,7 +882,8 @@ pub(crate) fn rotate_backups(original_path: &Path, keep: usize) -> Result<(), Cy
     for backup in &backups[..count - keep] {
         if let Err(err) = fs::remove_file(backup) {
             eprintln!(
-                "warning: failed to remove old backup {}: {}",
+                "{} failed to remove old backup {}: {}",
+                "warning:".yellow().bold(),
                 backup.display(),
                 err
             );
@@ -937,7 +975,8 @@ pub(crate) fn clear_stale_history(
             *history = serde_json::Value::Array(vec![]);
         } else {
             eprintln!(
-                "warning: history for {} is not an array, skipping",
+                "{} history for {} is not an array, skipping",
+                "warning:".yellow().bold(),
                 path
             );
         }
@@ -1042,7 +1081,10 @@ fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
     let mut profile: Option<String> = None;
     let mut all = false;
 
-    let usage = "Usage: cyolo diet [--apply] [--force] [--stale-days <N>] [--cache] [--profile <name>] [--all]";
+    let usage = format!(
+        "{} cyolo diet [--apply] [--force] [--stale-days <N>] [--cache] [--profile <name>] [--all]",
+        "Usage:".yellow().bold()
+    );
 
     let mut i = 0;
     while i < args.len() {
@@ -1054,17 +1096,24 @@ fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
             "--stale-days" => {
                 i += 1;
                 if i >= args.len() {
-                    eprintln!("cyolo: --stale-days requires a value");
+                    eprintln!("{} --stale-days requires a value", "error:".red().bold());
                     eprintln!("{usage}");
                     return Err(CyoloError::NonZeroExit(1));
                 }
                 let n: u32 = args[i].parse().map_err(|_| {
-                    eprintln!("cyolo: --stale-days value must be a positive integer, got '{}'", args[i]);
+                    eprintln!(
+                        "{} --stale-days value must be a positive integer, got '{}'",
+                        "error:".red().bold(),
+                        args[i]
+                    );
                     eprintln!("{usage}");
                     CyoloError::NonZeroExit(1)
                 })?;
                 if n == 0 {
-                    eprintln!("cyolo: --stale-days value must be greater than zero");
+                    eprintln!(
+                        "{} --stale-days value must be greater than zero",
+                        "error:".red().bold()
+                    );
                     eprintln!("{usage}");
                     return Err(CyoloError::NonZeroExit(1));
                 }
@@ -1073,14 +1122,18 @@ fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
             "--profile" => {
                 i += 1;
                 if i >= args.len() || args[i].starts_with("--") {
-                    eprintln!("cyolo: --profile requires a value");
+                    eprintln!("{} --profile requires a value", "error:".red().bold());
                     eprintln!("{usage}");
                     return Err(CyoloError::NonZeroExit(1));
                 }
                 profile = Some(args[i].clone());
             }
             _ => {
-                eprintln!("cyolo: unknown diet option '{}'", args[i]);
+                eprintln!(
+                    "{} unknown diet option '{}'",
+                    "error:".red().bold(),
+                    args[i]
+                );
                 eprintln!("{usage}");
                 return Err(CyoloError::NonZeroExit(1));
             }
@@ -1089,7 +1142,10 @@ fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
     }
 
     if profile.is_some() && all {
-        eprintln!("cyolo: --profile and --all are mutually exclusive");
+        eprintln!(
+            "{} --profile and --all are mutually exclusive",
+            "error:".red().bold()
+        );
         eprintln!("{usage}");
         return Err(CyoloError::NonZeroExit(1));
     }
@@ -1144,7 +1200,10 @@ fn resolve_profiles_from_config(
 
     // options.all
     if cfg.profiles.is_empty() {
-        eprintln!("cyolo: no profiles registered. Run: cyolo profile add <name>");
+        eprintln!(
+            "{} no profiles registered. Run: cyolo profile add <name>",
+            "error:".red().bold()
+        );
         return Err(CyoloError::NonZeroExit(1));
     }
     let entries: Vec<(String, PathBuf)> = cfg
@@ -1170,7 +1229,10 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     let options = parse_diet_args(args)?;
 
     if !options.force && is_claude_running() {
-        eprintln!("cyolo: Claude is currently running. Stop Claude first, or use --force to proceed.");
+        eprintln!(
+            "{} Claude is currently running. Stop Claude first, or use --force to proceed.",
+            "error:".red().bold()
+        );
         return Err(CyoloError::NonZeroExit(1));
     }
 
@@ -1252,9 +1314,10 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             if !report.cache_dirs.is_empty() {
                 let (cache_removed, cache_freed) = remove_cache_contents(&report.cache_dirs)?;
                 println!(
-                    "Cleared {} cache dirs ({} freed)",
-                    cache_removed,
-                    format_size(cache_freed)
+                    "{} Cleared {} cache dirs ({} freed)",
+                    "✓".green(),
+                    cache_removed.to_string().green(),
+                    format_size(cache_freed).cyan()
                 );
             }
 
@@ -1265,7 +1328,8 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
                 if session_path.is_dir() {
                     if let Err(e) = fs::remove_dir_all(&session_path) {
                         eprintln!(
-                            "warning: failed to remove stale session {}: {}",
+                            "{} failed to remove stale session {}: {}",
+                            "warning:".yellow().bold(),
                             session_path.display(),
                             e
                         );
@@ -1293,7 +1357,8 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         if has_json_mutations && analysis.parsed_json != serde_json::Value::Null {
             let backup_path = backup_claude_json(&claude_json_path)?;
             println!(
-                "Backed up to {}",
+                "{} Backed up to {}",
+                "✓".green(),
                 tilde_path(&backup_path.to_string_lossy())
             );
             rotate_backups(&claude_json_path, 5)?;
@@ -1301,12 +1366,20 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             // In-memory mutations on the shared JSON.
             remove_orphaned_entries(&mut analysis.parsed_json, &all_orphaned_paths);
             if !all_orphaned_paths.is_empty() {
-                println!("Removed {} orphaned project entries", all_orphaned_paths.len());
+                println!(
+                    "{} Removed {} orphaned project entries",
+                    "✓".green(),
+                    all_orphaned_paths.len().to_string().green()
+                );
             }
 
             clear_stale_history(&mut analysis.parsed_json, &all_stale_paths);
             if !all_stale_paths.is_empty() {
-                println!("Cleared history for {} stale projects", all_stale_paths.len());
+                println!(
+                    "{} Cleared history for {} stale projects",
+                    "✓".green(),
+                    all_stale_paths.len().to_string().green()
+                );
             }
 
             // Single atomic write.
@@ -1327,13 +1400,14 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         let (removed_count, bytes_freed) = remove_session_folders(&all_orphaned_sessions)?;
         if removed_count > 0 {
             println!(
-                "Removed {} orphaned session folders ({} freed)",
-                removed_count,
-                format_size(bytes_freed)
+                "{} Removed {} orphaned session folders ({} freed)",
+                "✓".green(),
+                removed_count.to_string().green(),
+                format_size(bytes_freed).cyan()
             );
         }
 
-        println!("Cleanup complete.");
+        println!("{} Cleanup complete.", "✓".green());
     }
 
     Ok(())
@@ -3189,7 +3263,8 @@ mod tests {
         );
         let output = build_report_string(&report, false);
 
-        assert!(output.contains("Total reclaimable: 10.3 KB"));
+        assert!(output.contains("Total reclaimable:"));
+        assert!(output.contains("10.3 KB"));
     }
 
     #[test]

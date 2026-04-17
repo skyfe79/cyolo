@@ -25,7 +25,7 @@ dispatch() messages:
 - Warning messages → "warning:" yellow bold prefix
 - Success messages → "success:" or checkmark in green
 - Action count messages → count numbers in green""",
-    status="pending",
+    status="completed",
     agent="meta-agent",
     skills=[],
     mcp_tools=[],
