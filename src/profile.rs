@@ -332,14 +332,15 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
         return Err(CyoloError::ProfileNotFound { name });
     }
 
-    // Check if .claude-profile.json already exists in cwd
+    // Check if .claude-profile.json already exists in cwd (including broken symlinks)
     let cwd = std::env::current_dir().map_err(|e| CyoloError::ConfigIoError {
         context: "could not determine current directory".into(),
         source: e,
     })?;
     let profile_path = cwd.join(".claude-profile.json");
 
-    if profile_path.exists() {
+    // Use symlink_metadata to detect broken symlinks (exists() returns false for them)
+    if std::fs::symlink_metadata(&profile_path).is_ok() {
         eprintln!(
             "cyolo: .claude-profile.json already exists in {}",
             cwd.display()
@@ -347,15 +348,23 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
         return Err(CyoloError::NonZeroExit(1));
     }
 
-    // Write the file
+    // Write atomically with create_new to avoid TOCTOU race
     let contents = serde_json::to_string_pretty(&serde_json::json!({"name": name}))
         .expect("JSON serialization of simple object cannot fail");
-    std::fs::write(&profile_path, format!("{contents}\n")).map_err(|e| {
-        CyoloError::ConfigIoError {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&profile_path)
+        .map_err(|e| CyoloError::ConfigIoError {
+            context: format!("failed to create {}", profile_path.display()),
+            source: e,
+        })?;
+    file.write_all(format!("{contents}\n").as_bytes())
+        .map_err(|e| CyoloError::ConfigIoError {
             context: format!("failed to write {}", profile_path.display()),
             source: e,
-        }
-    })?;
+        })?;
 
     println!("Created .claude-profile.json (profile: {name})");
     Ok(())
