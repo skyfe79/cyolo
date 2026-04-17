@@ -455,6 +455,62 @@ pub(crate) fn backup_claude_json(claude_json_path: &Path) -> Result<PathBuf, Cyo
     Ok(backup_path)
 }
 
+/// Rotate backup files for a given path, keeping only the most recent `keep` backups.
+///
+/// Lists files matching `<filename>.backup-*` in the parent directory, sorts
+/// alphabetically (YYYYMMDDHHMMSS naturally sorts chronologically), keeps the
+/// latest `keep` entries, and deletes the rest. Individual delete failures warn
+/// to stderr but don't abort.
+pub(crate) fn rotate_backups(original_path: &Path, keep: usize) -> Result<(), CyoloError> {
+    let parent = match original_path.parent() {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+
+    let prefix = format!(
+        "{}.backup-",
+        original_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+
+    let entries = fs::read_dir(parent).map_err(|e| CyoloError::ConfigIoError {
+        context: format!("failed to read directory {}", parent.display()),
+        source: e,
+    })?;
+
+    let mut backups: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+        })
+        .map(|entry| entry.path())
+        .collect();
+
+    backups.sort();
+
+    let count = backups.len();
+    if count <= keep {
+        return Ok(());
+    }
+
+    for backup in &backups[..count - keep] {
+        if let Err(err) = fs::remove_file(backup) {
+            eprintln!(
+                "warning: failed to remove old backup {}: {}",
+                backup.display(),
+                err
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Write JSON content to a file atomically using temp-file + sync + rename.
 ///
 /// Creates a temporary file (`.json.tmp` extension) in the same directory,
@@ -610,6 +666,7 @@ pub(crate) fn apply(
         "Backed up to {}",
         tilde_path(&backup_path.to_string_lossy())
     );
+    rotate_backups(claude_json_path, 5)?;
 
     // Step 2: Remove orphaned entries from JSON
     let orphaned_paths: Vec<String> = report
@@ -1550,5 +1607,85 @@ mod tests {
         assert_eq!(freed, 5);
         assert!(!s1.exists());
         assert!(!s2.exists());
+    }
+
+    // ── rotate_backups tests ─────────────────────────────────
+
+    #[test]
+    fn test_rotate_backups_deletes_oldest() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("claude.json");
+        fs::write(&base, "original").unwrap();
+
+        let timestamps = [
+            "20260417120001",
+            "20260417120002",
+            "20260417120003",
+            "20260417120004",
+            "20260417120005",
+            "20260417120006",
+            "20260417120007",
+        ];
+        for ts in &timestamps {
+            fs::write(dir.path().join(format!("claude.json.backup-{ts}")), "backup").unwrap();
+        }
+
+        rotate_backups(&base, 5).unwrap();
+
+        // Oldest 2 should be deleted
+        assert!(!dir.path().join("claude.json.backup-20260417120001").exists());
+        assert!(!dir.path().join("claude.json.backup-20260417120002").exists());
+        // Newest 5 should remain
+        for ts in &timestamps[2..] {
+            assert!(dir.path().join(format!("claude.json.backup-{ts}")).exists());
+        }
+        // Base file untouched
+        assert_eq!(fs::read_to_string(&base).unwrap(), "original");
+    }
+
+    #[test]
+    fn test_rotate_backups_keeps_all_when_under_limit() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("claude.json");
+        fs::write(&base, "original").unwrap();
+
+        for ts in &["20260417120001", "20260417120002", "20260417120003"] {
+            fs::write(dir.path().join(format!("claude.json.backup-{ts}")), "backup").unwrap();
+        }
+
+        rotate_backups(&base, 5).unwrap();
+
+        // All 3 should still exist
+        for ts in &["20260417120001", "20260417120002", "20260417120003"] {
+            assert!(dir.path().join(format!("claude.json.backup-{ts}")).exists());
+        }
+    }
+
+    #[test]
+    fn test_rotate_backups_exactly_at_limit() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("claude.json");
+        fs::write(&base, "original").unwrap();
+
+        for i in 1..=5 {
+            fs::write(dir.path().join(format!("claude.json.backup-2026041712000{i}")), "backup").unwrap();
+        }
+
+        rotate_backups(&base, 5).unwrap();
+
+        // All 5 should still exist
+        for i in 1..=5 {
+            assert!(dir.path().join(format!("claude.json.backup-2026041712000{i}")).exists());
+        }
+    }
+
+    #[test]
+    fn test_rotate_backups_no_backups() {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().join("claude.json");
+        fs::write(&base, "original").unwrap();
+
+        // No backup files exist — should succeed silently
+        rotate_backups(&base, 5).unwrap();
     }
 }
