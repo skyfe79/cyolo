@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod detect;
+mod diet;
 mod error;
 mod profile;
 mod runner;
