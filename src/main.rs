@@ -1,5 +1,7 @@
 mod cli;
 mod config;
+#[allow(dead_code)]
+mod detect;
 mod error;
 mod profile;
 mod runner;
