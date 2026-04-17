@@ -27,6 +27,10 @@ pub(crate) struct DietOptions {
     pub apply: bool,
     /// Whether `--force` was provided (skip safety checks like Claude-running guard).
     pub force: bool,
+    pub stale_days: Option<u32>,
+    pub cache: bool,
+    pub profile: Option<String>,
+    pub all: bool,
 }
 
 /// A project entry in `~/.claude.json` whose filesystem path no longer exists.
@@ -693,26 +697,75 @@ pub(crate) fn apply(
 
 /// Parse CLI arguments for the `diet` subcommand.
 ///
-/// No args → dry-run (`DietOptions { apply: false, force: false }`).
-/// `--apply` → execute cleanup (`DietOptions { apply: true, force: false }`).
-/// `--force` → skip safety checks (`DietOptions { apply: false, force: true }`).
-/// Order-independent: `--force --apply` and `--apply --force` both work.
-/// Unknown args → error with usage message.
+/// No args → dry-run.
+/// `--apply` → execute cleanup.
+/// `--force` → skip safety checks.
+/// `--stale-days <N>` → only consider entries older than N days (N > 0).
+/// `--cache` → include cache cleanup.
+/// `--profile <name>` → target a specific profile (mutually exclusive with `--all`).
+/// `--all` → target all profiles (mutually exclusive with `--profile`).
+/// Order-independent. Unknown args → error with usage message.
 fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
     let mut apply = false;
     let mut force = false;
-    for arg in args {
-        match arg.as_str() {
+    let mut stale_days: Option<u32> = None;
+    let mut cache = false;
+    let mut profile: Option<String> = None;
+    let mut all = false;
+
+    let usage = "Usage: cyolo diet [--apply] [--force] [--stale-days <N>] [--cache] [--profile <name>] [--all]";
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "--apply" => apply = true,
             "--force" => force = true,
+            "--cache" => cache = true,
+            "--all" => all = true,
+            "--stale-days" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("cyolo: --stale-days requires a value");
+                    eprintln!("{usage}");
+                    return Err(CyoloError::NonZeroExit(1));
+                }
+                let n: u32 = args[i].parse().map_err(|_| {
+                    eprintln!("cyolo: --stale-days value must be a positive integer, got '{}'", args[i]);
+                    eprintln!("{usage}");
+                    CyoloError::NonZeroExit(1)
+                })?;
+                if n == 0 {
+                    eprintln!("cyolo: --stale-days value must be greater than zero");
+                    eprintln!("{usage}");
+                    return Err(CyoloError::NonZeroExit(1));
+                }
+                stale_days = Some(n);
+            }
+            "--profile" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with("--") {
+                    eprintln!("cyolo: --profile requires a value");
+                    eprintln!("{usage}");
+                    return Err(CyoloError::NonZeroExit(1));
+                }
+                profile = Some(args[i].clone());
+            }
             _ => {
-                eprintln!("cyolo: unknown diet option '{arg}'");
-                eprintln!("Usage: cyolo diet [--apply] [--force]");
+                eprintln!("cyolo: unknown diet option '{}'", args[i]);
+                eprintln!("{usage}");
                 return Err(CyoloError::NonZeroExit(1));
             }
         }
+        i += 1;
     }
-    Ok(DietOptions { apply, force })
+
+    if profile.is_some() && all {
+        eprintln!("cyolo: --profile and --all are mutually exclusive");
+        eprintln!("{usage}");
+        return Err(CyoloError::NonZeroExit(1));
+    }
+
+    Ok(DietOptions { apply, force, stale_days, cache, profile, all })
 }
 
 /// Resolve the user's home directory and Claude home directory (`~/.claude`).
@@ -1503,6 +1556,10 @@ mod tests {
         let result = parse_diet_args(&[]).unwrap();
         assert!(!result.apply);
         assert!(!result.force);
+        assert!(result.stale_days.is_none());
+        assert!(!result.cache);
+        assert!(result.profile.is_none());
+        assert!(!result.all);
     }
 
     #[test]
@@ -1565,6 +1622,110 @@ mod tests {
         let args = vec!["--apply".to_string(), "--unknown".to_string()];
         let result = parse_diet_args(&args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_stale_days() {
+        let args = vec!["--stale-days".to_string(), "90".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert_eq!(result.stale_days, Some(90));
+    }
+
+    #[test]
+    fn test_parse_args_stale_days_missing_value() {
+        let args = vec!["--stale-days".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_stale_days_zero() {
+        let args = vec!["--stale-days".to_string(), "0".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_stale_days_negative() {
+        let args = vec!["--stale-days".to_string(), "-1".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_stale_days_non_numeric() {
+        let args = vec!["--stale-days".to_string(), "abc".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_cache() {
+        let args = vec!["--cache".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.cache);
+    }
+
+    #[test]
+    fn test_parse_args_profile() {
+        let args = vec!["--profile".to_string(), "work".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert_eq!(result.profile, Some("work".to_string()));
+    }
+
+    #[test]
+    fn test_parse_args_profile_missing_value() {
+        let args = vec!["--profile".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_all() {
+        let args = vec!["--all".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.all);
+    }
+
+    #[test]
+    fn test_parse_args_profile_and_all_exclusive() {
+        let args = vec!["--profile".to_string(), "x".to_string(), "--all".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_profile_swallows_flag() {
+        // Regression: --profile --apply should error, not set profile="--apply"
+        let args = vec!["--profile".to_string(), "--apply".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_profile_swallows_all_flag() {
+        let args = vec!["--profile".to_string(), "--all".to_string()];
+        let result = parse_diet_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_all_flags_combined() {
+        let args = vec![
+            "--apply".to_string(),
+            "--force".to_string(),
+            "--stale-days".to_string(),
+            "30".to_string(),
+            "--cache".to_string(),
+            "--all".to_string(),
+        ];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.apply);
+        assert!(result.force);
+        assert_eq!(result.stale_days, Some(30));
+        assert!(result.cache);
+        assert!(result.profile.is_none());
+        assert!(result.all);
     }
 
     // ── is_claude_running tests ─────────────────────────────
