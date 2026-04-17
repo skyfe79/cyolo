@@ -98,6 +98,7 @@ pub fn find_profile_file() -> Result<Option<(PathBuf, ProfileFile)>, CyoloError>
 
 /// A resolved profile ready for use by the runner.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ResolvedProfile {
     /// Profile name, if resolved via a named profile.
     pub name: Option<String>,
