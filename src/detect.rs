@@ -234,8 +234,18 @@ mod tests {
 
     #[test]
     fn test_parse_malformed_json() {
+        // Malformed JSON produces `ConfigParseError` (the serde parse failure),
+        // *not* `ProfileFileError`.  `ProfileFileError` is reserved for the
+        // case where JSON is valid but no recognized field is present — see
+        // `test_parse_empty_object` / `test_parse_unknown_fields_only`.
+        // Product PRD §3.1 names the category "profile file error" loosely,
+        // but the actual contract splits it into these two distinct variants.
         let json = b"not json";
         let err = parse(json, Path::new("test.json")).unwrap_err();
+        assert!(
+            matches!(err, CyoloError::ConfigParseError { .. }),
+            "expected ConfigParseError for malformed JSON, got: {err:?}"
+        );
         let msg = err.to_string();
         assert!(msg.contains("failed to parse config"), "got: {msg}");
     }
@@ -337,8 +347,10 @@ mod tests {
         let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
 
         let err = resolve_with(&config, found).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("unknown"), "got: {msg}");
+        match &err {
+            CyoloError::ProfileNotFound { name } => assert_eq!(name, "unknown"),
+            other => panic!("expected ProfileNotFound, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -394,5 +406,21 @@ mod tests {
         let config = make_config(&[], None);
         let result = resolve_with(&config, None).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_resolve_with_both_name_and_config_dir_prefers_name() {
+        // Product PRD §4.1: when `.claude-profile.json` carries both `name`
+        // and `config_dir`, `name` wins and the inline `config_dir` is ignored.
+        let config = make_config(&[("work", "/home/user/.claude-work")], None);
+        let pf = ProfileFile {
+            name: Some("work".into()),
+            config_dir: Some("/inline/should/be/ignored".into()),
+        };
+        let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
+
+        let result = resolve_with(&config, found).unwrap().unwrap();
+        assert_eq!(result.name.as_deref(), Some("work"));
+        assert_eq!(result.config_dir, PathBuf::from("/home/user/.claude-work"));
     }
 }
