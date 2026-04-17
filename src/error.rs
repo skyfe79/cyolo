@@ -40,6 +40,10 @@ pub enum CyoloError {
     ProfileNotFound { name: String },
 
     #[allow(dead_code)]
+    #[error("cyolo: invalid profile file {path}: {message}")]
+    ProfileFileError { path: PathBuf, message: String },
+
+    #[allow(dead_code)]
     #[error("cyolo: failed to symlink {item}: {source} -> {target}: {source_err}")]
     SymlinkError {
         item: String,
