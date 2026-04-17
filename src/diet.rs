@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::CyoloError;
@@ -153,6 +154,94 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
+/// Convert a project filesystem path to its session directory name.
+///
+/// Claude stores per-project session data in `~/.claude/projects/` using the
+/// project's absolute path with `/` replaced by `-`.
+/// e.g. `/Users/codingmax/Private/labs/test-bot` → `-Users-codingmax-Private-labs-test-bot`
+pub(crate) fn project_path_to_session_dir(project_path: &str) -> String {
+    project_path.replace('/', "-")
+}
+
+/// Calculate the total size (in bytes) of all files within a directory, recursively.
+///
+/// Returns 0 if the path does not exist or is not a directory.
+/// Silently skips entries that cannot be read (e.g. permission errors).
+/// Symlinks are not followed — they are skipped to avoid loops and counting
+/// data outside the session tree.
+pub(crate) fn dir_size(path: &Path) -> u64 {
+    // Use symlink_metadata so symlinks themselves don't fool the is_dir check.
+    let meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+    if !meta.is_dir() {
+        return 0;
+    }
+
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+
+    let mut total: u64 = 0;
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let entry_path = entry.path();
+            // Use symlink_metadata to avoid following symlinks.
+            if let Ok(entry_meta) = fs::symlink_metadata(&entry_path) {
+                if entry_meta.is_dir() {
+                    total += dir_size(&entry_path);
+                } else if entry_meta.is_file() {
+                    total += entry_meta.len();
+                }
+                // Symlinks (entry_meta.is_symlink()) are intentionally skipped.
+            }
+        }
+    }
+    total
+}
+
+/// Scan session folders in `projects_dir` and identify those belonging to orphaned projects.
+///
+/// Returns a tuple of:
+/// - `Vec<OrphanedSession>`: session folders that map to orphaned project paths
+/// - `u64`: total size of *all* session folders in `projects_dir`
+pub(crate) fn scan_session_folders(
+    projects_dir: &Path,
+    orphaned_paths: &[String],
+) -> (Vec<OrphanedSession>, u64) {
+    if !projects_dir.exists() {
+        return (Vec::new(), 0);
+    }
+
+    // Calculate total size of ALL entries in the projects directory.
+    let mut total_session_dir_size: u64 = 0;
+    if let Ok(entries) = fs::read_dir(projects_dir) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                total_session_dir_size += dir_size(&entry.path());
+            }
+        }
+    }
+
+    // Find session folders that correspond to orphaned project paths.
+    let mut orphaned_sessions = Vec::new();
+    for path in orphaned_paths {
+        let session_name = project_path_to_session_dir(path);
+        let session_path = projects_dir.join(&session_name);
+        if session_path.is_dir() {
+            let total_size = dir_size(&session_path);
+            orphaned_sessions.push(OrphanedSession {
+                folder_path: session_path,
+                total_size,
+            });
+        }
+    }
+
+    (orphaned_sessions, total_session_dir_size)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +395,152 @@ mod tests {
     #[test]
     fn test_format_size_exact_gb() {
         assert_eq!(format_size(1_073_741_824), "1.0 GB");
+    }
+
+    // ── scan_session_folders tests ──────────────────────────────
+
+    #[test]
+    fn test_path_encoding() {
+        assert_eq!(
+            project_path_to_session_dir("/Users/codingmax/Private/labs/test-bot"),
+            "-Users-codingmax-Private-labs-test-bot"
+        );
+    }
+
+    #[test]
+    fn test_path_encoding_root() {
+        assert_eq!(project_path_to_session_dir("/"), "-");
+    }
+
+    #[test]
+    fn test_path_encoding_nested() {
+        assert_eq!(
+            project_path_to_session_dir("/a/b/c/d"),
+            "-a-b-c-d"
+        );
+    }
+
+    #[test]
+    fn test_dir_size_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent");
+        assert_eq!(dir_size(&path), 0);
+    }
+
+    #[test]
+    fn test_dir_size_empty() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(dir_size(dir.path()), 0);
+    }
+
+    #[test]
+    fn test_dir_size_with_files() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "hello").unwrap(); // 5 bytes
+        fs::write(dir.path().join("b.txt"), "world!").unwrap(); // 6 bytes
+        assert_eq!(dir_size(dir.path()), 11);
+    }
+
+    #[test]
+    fn test_dir_size_recursive() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("a.txt"), "hi").unwrap(); // 2 bytes
+        fs::write(dir.path().join("sub").join("b.txt"), "hey").unwrap(); // 3 bytes
+        assert_eq!(dir_size(dir.path()), 5);
+    }
+
+    #[test]
+    fn test_scan_missing_projects_dir() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nonexistent");
+        let orphaned_paths = vec!["/some/path".to_string()];
+        let (sessions, total) = scan_session_folders(&missing, &orphaned_paths);
+        assert!(sessions.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_scan_finds_orphaned_sessions() {
+        let dir = TempDir::new().unwrap();
+        let projects_dir = dir.path();
+
+        // Create session folders matching orphaned paths
+        let session_name =
+            project_path_to_session_dir("/Users/codingmax/Private/labs/test-bot");
+        let session_path = projects_dir.join(&session_name);
+        fs::create_dir(&session_path).unwrap();
+        fs::write(session_path.join("data.json"), "test data here").unwrap(); // 14 bytes
+
+        // Also create a non-orphaned session folder
+        let active_name =
+            project_path_to_session_dir("/Users/codingmax/active-project");
+        let active_path = projects_dir.join(&active_name);
+        fs::create_dir(&active_path).unwrap();
+        fs::write(active_path.join("state.json"), "active").unwrap(); // 6 bytes
+
+        let orphaned_paths =
+            vec!["/Users/codingmax/Private/labs/test-bot".to_string()];
+        let (sessions, total) = scan_session_folders(projects_dir, &orphaned_paths);
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].folder_path, session_path);
+        assert_eq!(sessions[0].total_size, 14);
+        // total should include ALL session dirs (orphaned + active)
+        assert_eq!(total, 20); // 14 + 6
+    }
+
+    #[test]
+    fn test_scan_no_matching_sessions() {
+        let dir = TempDir::new().unwrap();
+        let projects_dir = dir.path();
+
+        // Create a session folder that does NOT match any orphaned path
+        let other_name = project_path_to_session_dir("/some/other/project");
+        fs::create_dir(projects_dir.join(&other_name)).unwrap();
+
+        let orphaned_paths = vec!["/Users/nonexistent/path".to_string()];
+        let (sessions, total) = scan_session_folders(projects_dir, &orphaned_paths);
+
+        assert!(sessions.is_empty());
+        // total should still count the existing session folder
+        assert_eq!(total, 0); // empty dir has size 0
+    }
+
+    #[test]
+    fn test_dir_size_ignores_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+
+        // Create a real file in the target (should NOT be counted)
+        fs::write(target_dir.path().join("big.bin"), vec![0u8; 1000]).unwrap();
+
+        // Create a symlink inside the scanned dir pointing to the target
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target_dir.path(), dir.path().join("link")).unwrap();
+        }
+
+        // Create a real file alongside the symlink
+        fs::write(dir.path().join("real.txt"), "data").unwrap(); // 4 bytes
+
+        // dir_size should only count the real file, NOT follow the symlink
+        assert_eq!(dir_size(dir.path()), 4);
+    }
+
+    #[test]
+    fn test_scan_ignores_file_as_session() {
+        let dir = TempDir::new().unwrap();
+        let projects_dir = dir.path();
+
+        // Create a regular file (not a directory) with the encoded session name
+        let session_name = project_path_to_session_dir("/Users/codingmax/fake-project");
+        fs::write(projects_dir.join(&session_name), "not a dir").unwrap();
+
+        let orphaned_paths = vec!["/Users/codingmax/fake-project".to_string()];
+        let (sessions, _total) = scan_session_folders(projects_dir, &orphaned_paths);
+
+        // Should NOT be included because it's a file, not a directory
+        assert!(sessions.is_empty());
     }
 }
