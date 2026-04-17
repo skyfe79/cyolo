@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -240,6 +241,145 @@ pub(crate) fn scan_session_folders(
     }
 
     (orphaned_sessions, total_session_dir_size)
+}
+
+/// Replace the user's home directory prefix with `~` for shorter display paths.
+///
+/// Uses `Path::strip_prefix` for boundary-safe matching (avoids false positives
+/// like `/Users/codingmax-old/` being rewritten to `~-old/`).
+fn tilde_path(path: &str) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = Path::new(path).strip_prefix(&home) {
+            let rest_str = rest.to_string_lossy();
+            if rest_str.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{rest_str}");
+        }
+    }
+    path.to_string()
+}
+
+/// Build a tree-style report string from the diet analysis results.
+///
+/// Returns a `String` (rather than printing directly) for testability.
+/// `applied` controls the footer text ("Cleanup complete." vs "Run with --apply").
+pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String {
+    let claude_home_display = tilde_path(&report.claude_home.to_string_lossy());
+
+    // Special case: no orphans at all.
+    if report.orphaned_projects.is_empty() && report.orphaned_sessions.is_empty() {
+        return format!(
+            "cyolo diet — analyzing {claude_home_display}\n\n\
+             No orphaned projects found. Nothing to clean up.\n"
+        );
+    }
+
+    let mut buf = String::new();
+
+    // Header
+    writeln!(buf, "cyolo diet — analyzing {claude_home_display}").unwrap();
+    writeln!(buf).unwrap();
+
+    // ── ~/.claude.json section ──────────────────────────────────
+    let claude_json_display = format!("{claude_home_display}.json");
+    let orphan_total_size: u64 = report.orphaned_projects.iter().map(|o| o.entry_size).sum();
+
+    writeln!(
+        buf,
+        "{:<45} {}",
+        format!("{claude_json_display}:"),
+        format_size(report.config_file_size)
+    )
+    .unwrap();
+
+    let orphan_count = report.orphaned_projects.len();
+
+    // Orphaned projects line (always shown)
+    writeln!(
+        buf,
+        "  ├─ {:<41} {}  (removable)",
+        format!("orphaned projects ({orphan_count}):"),
+        format_size(orphan_total_size)
+    )
+    .unwrap();
+
+    if orphan_count > 0 {
+        // Individual orphaned paths (max 5)
+        let display_count = orphan_count.min(5);
+        for (i, orphan) in report.orphaned_projects.iter().take(5).enumerate() {
+            let is_last = i == display_count - 1 && orphan_count <= 5;
+            let item_char = if is_last { "└─" } else { "├─" };
+            writeln!(
+                buf,
+                "  │   {item_char} {:<37} {}",
+                tilde_path(&orphan.path),
+                format_size(orphan.entry_size)
+            )
+            .unwrap();
+        }
+        if orphan_count > 5 {
+            writeln!(
+                buf,
+                "  │   └─ ... {} more",
+                orphan_count - 5
+            )
+            .unwrap();
+        }
+    }
+
+    // Active projects line (always shown)
+    let active_size = report.config_file_size.saturating_sub(orphan_total_size);
+    writeln!(
+        buf,
+        "  └─ {:<41} {}  (keep)",
+        format!("active projects ({}):", report.active_project_count),
+        format_size(active_size)
+    )
+    .unwrap();
+
+    writeln!(buf).unwrap();
+
+    // ── ~/.claude/projects/ section ─────────────────────────────
+    writeln!(
+        buf,
+        "{:<45} {}",
+        format!("{claude_home_display}/projects/:"),
+        format_size(report.session_dir_total_size)
+    )
+    .unwrap();
+
+    let session_total_size: u64 = report.orphaned_sessions.iter().map(|s| s.total_size).sum();
+    let session_count = report.orphaned_sessions.len();
+    // Always show orphaned session folders line
+    writeln!(
+        buf,
+        "  └─ {:<41} {}  (removable)",
+        format!("orphaned session folders ({session_count}):"),
+        format_size(session_total_size)
+    )
+    .unwrap();
+
+    writeln!(buf).unwrap();
+
+    // Total reclaimable
+    let total_reclaimable = orphan_total_size + session_total_size;
+    writeln!(buf, "Total reclaimable: {}", format_size(total_reclaimable)).unwrap();
+    writeln!(buf).unwrap();
+
+    // Footer
+    if applied {
+        writeln!(buf, "Cleanup complete.").unwrap();
+    } else {
+        writeln!(buf, "Run with --apply to proceed.").unwrap();
+    }
+
+    buf
+}
+
+/// Print the diet analysis report to stdout.
+pub(crate) fn print_report(report: &DietReport, applied: bool) {
+    print!("{}", build_report_string(report, applied));
 }
 
 #[cfg(test)]
@@ -542,5 +682,149 @@ mod tests {
 
         // Should NOT be included because it's a file, not a directory
         assert!(sessions.is_empty());
+    }
+
+    // ── build_report_string tests ──────────────────────────────
+
+    /// Helper: create a DietReport with the given orphaned projects and sessions.
+    fn make_report(
+        orphan_paths: &[(&str, u64)],
+        sessions: Vec<OrphanedSession>,
+        active_count: usize,
+    ) -> DietReport {
+        let orphaned_projects = orphan_paths
+            .iter()
+            .map(|(p, s)| OrphanedProject {
+                path: p.to_string(),
+                entry_size: *s,
+            })
+            .collect();
+        let session_total: u64 = sessions.iter().map(|s| s.total_size).sum();
+        DietReport {
+            orphaned_projects,
+            orphaned_sessions: sessions,
+            active_project_count: active_count,
+            config_file_size: 50_000,
+            session_dir_total_size: session_total + 100_000, // sessions + active
+            claude_home: PathBuf::from("/fakehome/.claude"),
+        }
+    }
+
+    #[test]
+    fn test_report_no_orphans() {
+        let report = make_report(&[], vec![], 3);
+        let output = build_report_string(&report, false);
+        assert!(output.contains("No orphaned projects found. Nothing to clean up."));
+        assert!(output.contains("cyolo diet — analyzing /fakehome/.claude"));
+        // Should NOT contain tree structure or footer
+        assert!(!output.contains("├─"));
+        assert!(!output.contains("Run with --apply"));
+    }
+
+    #[test]
+    fn test_report_one_orphan() {
+        let report = make_report(
+            &[("/fakehome/projects/deleted", 1024)],
+            vec![],
+            2,
+        );
+        let output = build_report_string(&report, false);
+        assert!(output.contains("orphaned projects (1):"));
+        assert!(output.contains("/fakehome/projects/deleted"));
+        assert!(output.contains("1.0 KB"));
+        assert!(output.contains("active projects (2):"));
+        // Active size = config_file_size(50000) - orphan_size(1024) = 48976
+        assert!(output.contains("47.8 KB"));
+        assert!(output.contains("(keep)"));
+        assert!(output.contains("Run with --apply to proceed."));
+    }
+
+    #[test]
+    fn test_report_five_orphans() {
+        let paths: Vec<(&str, u64)> = (1..=5)
+            .map(|i| {
+                // Use a static slice for the path strings
+                let path: &str = match i {
+                    1 => "/fakehome/projects/p1",
+                    2 => "/fakehome/projects/p2",
+                    3 => "/fakehome/projects/p3",
+                    4 => "/fakehome/projects/p4",
+                    5 => "/fakehome/projects/p5",
+                    _ => unreachable!(),
+                };
+                (path, 500u64)
+            })
+            .collect();
+        let report = make_report(&paths, vec![], 1);
+        let output = build_report_string(&report, false);
+        assert!(output.contains("orphaned projects (5):"));
+        // All 5 should be listed
+        for i in 1..=5 {
+            assert!(output.contains(&format!("/fakehome/projects/p{i}")));
+        }
+        // No "... more" line
+        assert!(!output.contains("more"));
+    }
+
+    #[test]
+    fn test_report_ten_orphans() {
+        let path_strings: Vec<String> = (1..=10)
+            .map(|i| format!("/fakehome/projects/p{i:02}"))
+            .collect();
+        let paths: Vec<(&str, u64)> = path_strings
+            .iter()
+            .map(|s| (s.as_str(), 200u64))
+            .collect();
+        let report = make_report(&paths, vec![], 0);
+        let output = build_report_string(&report, false);
+        assert!(output.contains("orphaned projects (10):"));
+        // First 5 listed
+        for i in 1..=5 {
+            assert!(output.contains(&format!("/fakehome/projects/p{i:02}")));
+        }
+        // 6-10 collapsed
+        assert!(output.contains("... 5 more"));
+        // Path 6 should NOT be listed individually
+        assert!(!output.contains("/fakehome/projects/p06"));
+    }
+
+    #[test]
+    fn test_report_applied_footer() {
+        let report = make_report(
+            &[("/fakehome/projects/x", 512)],
+            vec![],
+            0,
+        );
+        let output = build_report_string(&report, true);
+        assert!(output.contains("Cleanup complete."));
+        assert!(!output.contains("Run with --apply"));
+    }
+
+    #[test]
+    fn test_report_dry_run_footer() {
+        let report = make_report(
+            &[("/fakehome/projects/x", 512)],
+            vec![],
+            0,
+        );
+        let output = build_report_string(&report, false);
+        assert!(output.contains("Run with --apply to proceed."));
+        assert!(!output.contains("Cleanup complete."));
+    }
+
+    #[test]
+    fn test_report_with_orphaned_sessions() {
+        let sessions = vec![OrphanedSession {
+            folder_path: PathBuf::from("/fakehome/.claude/projects/-fakehome-projects-x"),
+            total_size: 5000,
+        }];
+        let report = make_report(
+            &[("/fakehome/projects/x", 512)],
+            sessions,
+            1,
+        );
+        let output = build_report_string(&report, false);
+        assert!(output.contains("orphaned session folders (1):"));
+        assert!(output.contains("Total reclaimable:"));
     }
 }
