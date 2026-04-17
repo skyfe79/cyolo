@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use owo_colors::OwoColorize;
 use serde::Deserialize;
 
 use crate::config::CyoloConfig;
@@ -89,7 +90,10 @@ pub fn find_profile_file() -> Result<Option<(PathBuf, ProfileFile)>, CyoloError>
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("cyolo: warning: could not determine current directory: {e}");
+            eprintln!(
+                "{} could not determine current directory: {e}",
+                "warning:".yellow().bold()
+            );
             return Ok(None);
         }
     };

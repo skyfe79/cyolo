@@ -2,6 +2,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use owo_colors::OwoColorize;
+
 use crate::error::CyoloError;
 
 /// Whether a shared item is a file or a directory.
@@ -59,14 +61,20 @@ pub fn is_source_dir(config_dir: &Path) -> bool {
 /// stderr and moves on to the next item.
 pub fn create_shared_symlinks(config_dir: &Path) -> Result<(), CyoloError> {
     if is_source_dir(config_dir) {
-        eprintln!("cyolo: config dir is ~/.claude itself, skipping symlink creation");
+        eprintln!(
+            "{} config dir is ~/.claude itself, skipping symlink creation",
+            "warning:".yellow().bold()
+        );
         return Ok(());
     }
 
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            eprintln!("cyolo: could not determine home directory, skipping symlink creation");
+            eprintln!(
+                "{} could not determine home directory, skipping symlink creation",
+                "warning:".yellow().bold()
+            );
             return Ok(());
         }
     };
@@ -81,16 +89,30 @@ pub fn create_shared_symlinks(config_dir: &Path) -> Result<(), CyoloError> {
             match item.kind {
                 ItemKind::Directory => {
                     if let Err(e) = fs::create_dir_all(&source) {
-                        eprintln!("cyolo: failed to create source directory {}: {}", source.display(), e);
+                        eprintln!(
+                            "{} failed to create source directory {}: {}",
+                            "error:".red().bold(),
+                            source.display(),
+                            e
+                        );
                         continue;
                     }
                     if let Err(e) = fs::set_permissions(&source, fs::Permissions::from_mode(0o755)) {
-                        eprintln!("cyolo: failed to set permissions on {}: {}", source.display(), e);
+                        eprintln!(
+                            "{} failed to set permissions on {}: {}",
+                            "error:".red().bold(),
+                            source.display(),
+                            e
+                        );
                         continue;
                     }
                 }
                 ItemKind::File => {
-                    eprintln!("cyolo: source file {} not found, skipping", source.display());
+                    eprintln!(
+                        "{} source file {} not found, skipping",
+                        "warning:".yellow().bold(),
+                        source.display()
+                    );
                     continue;
                 }
             }
@@ -98,14 +120,19 @@ pub fn create_shared_symlinks(config_dir: &Path) -> Result<(), CyoloError> {
 
         // Detect existing target (symlink_metadata catches broken symlinks too).
         if fs::symlink_metadata(&target).is_ok() {
-            eprintln!("cyolo: target {} already exists, skipping", target.display());
+            eprintln!(
+                "{} target {} already exists, skipping",
+                "warning:".yellow().bold(),
+                target.display()
+            );
             continue;
         }
 
         // Create the symlink (absolute paths).
         if let Err(e) = std::os::unix::fs::symlink(&source, &target) {
             eprintln!(
-                "cyolo: failed to symlink {} -> {}: {}",
+                "{} failed to symlink {} -> {}: {}",
+                "error:".red().bold(),
                 source.display(),
                 target.display(),
                 e

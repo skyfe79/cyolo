@@ -14,7 +14,7 @@ task = Task(
 - symlink.rs: "warning:" in yellow bold, "error:" in red bold for failures
 - detect.rs: "warning:" in yellow bold
 - Drop the "cyolo:" prefix from messages in favor of the colored severity labels""",
-    status="pending",
+    status="completed",
     agent="meta-agent",
     skills=[],
     mcp_tools=[],
