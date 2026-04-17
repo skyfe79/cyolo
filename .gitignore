@@ -32,3 +32,4 @@ page-*.jpeg
 # Added by cargo
 
 /target
+.mcp.json
