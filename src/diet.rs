@@ -24,6 +24,8 @@ pub(crate) fn is_claude_running() -> bool {
 pub(crate) struct DietOptions {
     /// Whether `--apply` was provided (execute cleanup vs dry-run).
     pub apply: bool,
+    /// Whether `--force` was provided (skip safety checks like Claude-running guard).
+    pub force: bool,
 }
 
 /// A project entry in `~/.claude.json` whose filesystem path no longer exists.
@@ -587,22 +589,26 @@ pub(crate) fn apply(
 
 /// Parse CLI arguments for the `diet` subcommand.
 ///
-/// No args → dry-run (`DietOptions { apply: false }`).
-/// `--apply` → execute cleanup (`DietOptions { apply: true }`).
+/// No args → dry-run (`DietOptions { apply: false, force: false }`).
+/// `--apply` → execute cleanup (`DietOptions { apply: true, force: false }`).
+/// `--force` → skip safety checks (`DietOptions { apply: false, force: true }`).
+/// Order-independent: `--force --apply` and `--apply --force` both work.
 /// Unknown args → error with usage message.
 fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
     let mut apply = false;
+    let mut force = false;
     for arg in args {
         match arg.as_str() {
             "--apply" => apply = true,
+            "--force" => force = true,
             _ => {
                 eprintln!("cyolo: unknown diet option '{arg}'");
-                eprintln!("Usage: cyolo diet [--apply]");
+                eprintln!("Usage: cyolo diet [--apply] [--force]");
                 return Err(CyoloError::NonZeroExit(1));
             }
         }
     }
-    Ok(DietOptions { apply })
+    Ok(DietOptions { apply, force })
 }
 
 /// Resolve the user's home directory and Claude home directory (`~/.claude`).
@@ -1345,6 +1351,7 @@ mod tests {
     fn test_parse_args_empty() {
         let result = parse_diet_args(&[]).unwrap();
         assert!(!result.apply);
+        assert!(!result.force);
     }
 
     #[test]
@@ -1352,13 +1359,38 @@ mod tests {
         let args = vec!["--apply".to_string()];
         let result = parse_diet_args(&args).unwrap();
         assert!(result.apply);
+        assert!(!result.force);
     }
 
     #[test]
     fn test_parse_args_unknown_flag() {
-        let args = vec!["--force".to_string()];
+        let args = vec!["--verbose".to_string()];
         let result = parse_diet_args(&args);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_args_force() {
+        let args = vec!["--force".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(!result.apply);
+        assert!(result.force);
+    }
+
+    #[test]
+    fn test_parse_args_apply_and_force() {
+        let args = vec!["--apply".to_string(), "--force".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.apply);
+        assert!(result.force);
+    }
+
+    #[test]
+    fn test_parse_args_force_and_apply() {
+        let args = vec!["--force".to_string(), "--apply".to_string()];
+        let result = parse_diet_args(&args).unwrap();
+        assert!(result.apply);
+        assert!(result.force);
     }
 
     #[test]
