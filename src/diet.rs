@@ -51,6 +51,19 @@ pub(crate) struct OrphanedSession {
     pub total_size: u64,
 }
 
+/// A project whose session files have not been modified within the staleness threshold.
+#[derive(Debug)]
+pub(crate) struct StaleProject {
+    /// Absolute filesystem path of the project.
+    pub path: String,
+    /// Seconds since the newest file in the session directory was modified.
+    pub last_activity_secs: u64,
+    /// Approximate serialized size of this project's `history` array in the JSON config.
+    pub history_size: u64,
+    /// Total size of the project's session directory in bytes.
+    pub session_size: u64,
+}
+
 /// Aggregated analysis results for the diet command.
 #[derive(Debug)]
 pub(crate) struct DietReport {
@@ -263,6 +276,130 @@ pub(crate) fn scan_session_folders(
     }
 
     (orphaned_sessions, total_session_dir_size)
+}
+
+/// Find the newest modification time among all files in a directory tree.
+///
+/// Mirrors the [`dir_size`] recursion pattern (symlink-safe via `fs::symlink_metadata`).
+/// Returns `None` if no file has a valid `modified()` timestamp.
+fn newest_mtime(dir: &Path) -> Option<SystemTime> {
+    let meta = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+    if !meta.is_dir() {
+        return None;
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return None,
+    };
+
+    let mut newest: Option<SystemTime> = None;
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        // Use symlink_metadata to avoid following symlinks.
+        if let Ok(entry_meta) = fs::symlink_metadata(&entry_path) {
+            if entry_meta.is_dir() {
+                if let Some(child_mtime) = newest_mtime(&entry_path) {
+                    newest = Some(match newest {
+                        Some(current) if current >= child_mtime => current,
+                        _ => child_mtime,
+                    });
+                }
+            } else if entry_meta.is_file() {
+                match entry_meta.modified() {
+                    Ok(mtime) => {
+                        newest = Some(match newest {
+                            Some(current) if current >= mtime => current,
+                            _ => mtime,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: could not read mtime for {}: {}",
+                            entry_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+            // Symlinks (entry_meta.is_symlink()) are intentionally skipped.
+        }
+    }
+    newest
+}
+
+/// Detect projects whose session files have not been modified within the staleness threshold.
+///
+/// Only considers projects whose filesystem path still exists on disk (orphaned projects
+/// are handled separately). Projects with no session directory or an empty session directory
+/// are given the benefit of the doubt and skipped.
+pub(crate) fn detect_stale_projects(
+    parsed_json: &serde_json::Value,
+    projects_dir: &Path,
+    stale_days: u32,
+) -> Vec<StaleProject> {
+    let projects = match parsed_json.get("projects").and_then(|v| v.as_object()) {
+        Some(obj) => obj,
+        None => return Vec::new(),
+    };
+
+    let threshold_secs = stale_days as u64 * 86400;
+    let now = SystemTime::now();
+    let mut stale = Vec::new();
+
+    for (path_key, _project_value) in projects {
+        // Only consider projects whose filesystem path still exists.
+        if !Path::new(path_key).exists() {
+            continue;
+        }
+
+        let session_dir_name = project_path_to_session_dir(path_key);
+        let session_path = projects_dir.join(&session_dir_name);
+
+        // Check if session dir exists AND is a real directory (skip symlinks).
+        match fs::symlink_metadata(&session_path) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => continue, // No session dir or not a real dir → skip.
+        }
+
+        // Empty session dir or no valid mtime → skip (benefit of the doubt).
+        let mtime = match newest_mtime(&session_path) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // If mtime is in the future, duration_since returns Err → not stale.
+        let age = match now.duration_since(mtime) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        if age.as_secs() >= threshold_secs {
+            // Compute history_size from the JSON (only if history is an array).
+            let history_size = parsed_json
+                .get("projects")
+                .and_then(|p| p.get(path_key))
+                .and_then(|proj| proj.get("history"))
+                .filter(|h| h.is_array())
+                .and_then(|h| serde_json::to_string(h).ok())
+                .map(|s| s.len() as u64)
+                .unwrap_or(0);
+
+            let session_size = dir_size(&session_path);
+
+            stale.push(StaleProject {
+                path: path_key.clone(),
+                last_activity_secs: age.as_secs(),
+                history_size,
+                session_size,
+            });
+        }
+    }
+
+    stale
 }
 
 /// Replace the user's home directory prefix with `~` for shorter display paths.
@@ -1853,5 +1990,195 @@ mod tests {
 
         // No backup files exist — should succeed silently
         rotate_backups(&base, 5).unwrap();
+    }
+
+    // ── detect_stale_projects tests ────────────────────────────────
+
+    #[test]
+    fn test_detect_stale_old_files() {
+        use std::fs::FileTimes;
+        use std::time::Duration;
+
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        // Create session dir with a file that has an old mtime.
+        let session_name = project_path_to_session_dir(&project_path);
+        let session_path = projects_dir.path().join(&session_name);
+        fs::create_dir_all(&session_path).unwrap();
+
+        let file_path = session_path.join("session.jsonl");
+        fs::write(&file_path, "some session data").unwrap();
+
+        let stale_days: u32 = 30;
+        let old_time = SystemTime::now() - Duration::from_secs(stale_days as u64 * 86400 + 1);
+        let file = fs::File::options().write(true).open(&file_path).unwrap();
+        file.set_times(FileTimes::new().set_modified(old_time)).unwrap();
+
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": []}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), stale_days);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, project_path);
+        assert!(result[0].last_activity_secs >= stale_days as u64 * 86400);
+        assert!(result[0].session_size > 0);
+    }
+
+    #[test]
+    fn test_detect_stale_recent_files() {
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        // Create session dir with a recently-modified file (default mtime = now).
+        let session_name = project_path_to_session_dir(&project_path);
+        let session_path = projects_dir.path().join(&session_name);
+        fs::create_dir_all(&session_path).unwrap();
+        fs::write(session_path.join("session.jsonl"), "recent data").unwrap();
+
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": []}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), 30);
+
+        assert!(result.is_empty(), "recently modified project should not be stale");
+    }
+
+    #[test]
+    fn test_detect_stale_no_session_dir() {
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        // No session directory created for this project.
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": []}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), 30);
+
+        assert!(result.is_empty(), "project with no session dir should not be stale");
+    }
+
+    #[test]
+    fn test_detect_stale_empty_session_dir() {
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        // Create an empty session directory.
+        let session_name = project_path_to_session_dir(&project_path);
+        let session_path = projects_dir.path().join(&session_name);
+        fs::create_dir_all(&session_path).unwrap();
+
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": []}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), 30);
+
+        assert!(result.is_empty(), "project with empty session dir should not be stale");
+    }
+
+    #[test]
+    fn test_detect_stale_orphan_skipped() {
+        let projects_dir = TempDir::new().unwrap();
+
+        // Project path does NOT exist on disk.
+        let nonexistent_path = "/nonexistent/path/to/project";
+
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                nonexistent_path: {"history": []}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), 30);
+
+        assert!(result.is_empty(), "nonexistent project path should be skipped entirely");
+    }
+
+    #[test]
+    fn test_detect_stale_history_size() {
+        use std::fs::FileTimes;
+        use std::time::Duration;
+
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        // Create session dir with an old file.
+        let session_name = project_path_to_session_dir(&project_path);
+        let session_path = projects_dir.path().join(&session_name);
+        fs::create_dir_all(&session_path).unwrap();
+
+        let file_path = session_path.join("session.jsonl");
+        fs::write(&file_path, "data").unwrap();
+
+        let stale_days: u32 = 7;
+        let old_time = SystemTime::now() - Duration::from_secs(stale_days as u64 * 86400 + 3600);
+        let file = fs::File::options().write(true).open(&file_path).unwrap();
+        file.set_times(FileTimes::new().set_modified(old_time)).unwrap();
+
+        let history_array = serde_json::json!(["cmd1", "cmd2", "cmd3"]);
+        let expected_history_size = serde_json::to_string(&history_array).unwrap().len() as u64;
+
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": history_array}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), stale_days);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].history_size, expected_history_size);
+    }
+
+    #[test]
+    fn test_detect_stale_history_non_array_ignored() {
+        use std::fs::FileTimes;
+        use std::time::Duration;
+
+        let projects_dir = TempDir::new().unwrap();
+        let project_dir = TempDir::new().unwrap();
+        let project_path = project_dir.path().to_string_lossy().to_string();
+
+        let session_name = project_path_to_session_dir(&project_path);
+        let session_path = projects_dir.path().join(&session_name);
+        fs::create_dir_all(&session_path).unwrap();
+
+        let file_path = session_path.join("session.jsonl");
+        fs::write(&file_path, "data").unwrap();
+
+        let stale_days: u32 = 7;
+        let old_time = SystemTime::now() - Duration::from_secs(stale_days as u64 * 86400 + 3600);
+        let file = fs::File::options().write(true).open(&file_path).unwrap();
+        file.set_times(FileTimes::new().set_modified(old_time)).unwrap();
+
+        // history is a string, not an array — should yield history_size = 0
+        let json: serde_json::Value = serde_json::json!({
+            "projects": {
+                project_path.clone(): {"history": "not-an-array"}
+            }
+        });
+
+        let result = detect_stale_projects(&json, projects_dir.path(), stale_days);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].history_size, 0, "non-array history should yield history_size=0");
     }
 }
