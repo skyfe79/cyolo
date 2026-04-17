@@ -14,9 +14,6 @@ pub enum CyoloError {
     #[error("")]
     NonZeroExit(i32),
 
-    #[error("cyolo: {0} is not yet implemented")]
-    NotImplemented(String),
-
     #[error("cyolo: failed to parse config at {path}: {source}")]
     ConfigParseError {
         path: PathBuf,

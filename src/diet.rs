@@ -188,18 +188,16 @@ pub(crate) fn dir_size(path: &Path) -> u64 {
     };
 
     let mut total: u64 = 0;
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let entry_path = entry.path();
-            // Use symlink_metadata to avoid following symlinks.
-            if let Ok(entry_meta) = fs::symlink_metadata(&entry_path) {
-                if entry_meta.is_dir() {
-                    total += dir_size(&entry_path);
-                } else if entry_meta.is_file() {
-                    total += entry_meta.len();
-                }
-                // Symlinks (entry_meta.is_symlink()) are intentionally skipped.
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        // Use symlink_metadata to avoid following symlinks.
+        if let Ok(entry_meta) = fs::symlink_metadata(&entry_path) {
+            if entry_meta.is_dir() {
+                total += dir_size(&entry_path);
+            } else if entry_meta.is_file() {
+                total += entry_meta.len();
             }
+            // Symlinks (entry_meta.is_symlink()) are intentionally skipped.
         }
     }
     total
@@ -221,10 +219,8 @@ pub(crate) fn scan_session_folders(
     // Calculate total size of ALL entries in the projects directory.
     let mut total_session_dir_size: u64 = 0;
     if let Ok(entries) = fs::read_dir(projects_dir) {
-        for entry in entries {
-            if let Ok(entry) = entry {
-                total_session_dir_size += dir_size(&entry.path());
-            }
+        for entry in entries.flatten() {
+            total_session_dir_size += dir_size(&entry.path());
         }
     }
 
@@ -234,16 +230,16 @@ pub(crate) fn scan_session_folders(
     for path in orphaned_paths {
         let session_name = project_path_to_session_dir(path);
         let session_path = projects_dir.join(&session_name);
-        if let Ok(meta) = fs::symlink_metadata(&session_path) {
-            if meta.is_dir() {
-                let total_size = dir_size(&session_path);
-                orphaned_sessions.push(OrphanedSession {
-                    folder_path: session_path,
-                    total_size,
-                });
-            }
-            // If it's a symlink (not a real dir), skip — don't follow it.
+        if let Ok(meta) = fs::symlink_metadata(&session_path)
+            && meta.is_dir()
+        {
+            let total_size = dir_size(&session_path);
+            orphaned_sessions.push(OrphanedSession {
+                folder_path: session_path,
+                total_size,
+            });
         }
+        // If it's a symlink (not a real dir), skip — don't follow it.
     }
 
     (orphaned_sessions, total_session_dir_size)
@@ -254,14 +250,14 @@ pub(crate) fn scan_session_folders(
 /// Uses `Path::strip_prefix` for boundary-safe matching (avoids false positives
 /// like `/Users/codingmax-old/` being rewritten to `~-old/`).
 fn tilde_path(path: &str) -> String {
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(rest) = Path::new(path).strip_prefix(&home) {
-            let rest_str = rest.to_string_lossy();
-            if rest_str.is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{rest_str}");
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = Path::new(path).strip_prefix(&home)
+    {
+        let rest_str = rest.to_string_lossy();
+        if rest_str.is_empty() {
+            return "~".to_string();
         }
+        return format!("~/{rest_str}");
     }
     path.to_string()
 }
@@ -513,10 +509,10 @@ pub(crate) fn remove_session_folders(
             // First pass: unlink any symlinks in the top-level directory entries.
             if let Ok(entries) = fs::read_dir(&session.folder_path) {
                 for entry in entries.flatten() {
-                    if let Ok(meta) = fs::symlink_metadata(entry.path()) {
-                        if meta.file_type().is_symlink() {
-                            let _ = fs::remove_file(entry.path());
-                        }
+                    if let Ok(meta) = fs::symlink_metadata(entry.path())
+                        && meta.file_type().is_symlink()
+                    {
+                        let _ = fs::remove_file(entry.path());
                     }
                 }
             }

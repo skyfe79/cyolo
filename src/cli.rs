@@ -1,4 +1,5 @@
 use crate::detect;
+use crate::diet;
 use crate::error::CyoloError;
 use crate::profile;
 use crate::runner;
@@ -33,7 +34,7 @@ pub fn route() -> Result<(), CyoloError> {
     match classify(&args) {
         Command::Update => runner::run_update(),
         Command::Profile(args) => profile::dispatch(&args),
-        Command::Diet(_) => Err(CyoloError::NotImplemented("diet".into())),
+        Command::Diet(args) => diet::dispatch(&args),
         Command::Claude(args) => {
             let resolved = detect::resolve_profile()?;
             let config_dir = resolved.as_ref().map(|r| r.config_dir.as_path());
