@@ -1,3 +1,5 @@
+use owo_colors::OwoColorize;
+
 use crate::detect;
 use crate::diet;
 use crate::error::CyoloError;
@@ -37,9 +39,28 @@ pub fn route() -> Result<(), CyoloError> {
         Command::Diet(args) => diet::dispatch(&args),
         Command::Claude(args) => {
             let resolved = detect::resolve_profile()?;
+            maybe_hint_no_profile(resolved.is_none());
             runner::run_claude(&args, resolved.as_ref())
         }
     }
+}
+
+/// Print a one-line heads-up to stderr when `cyolo` runs without any
+/// resolvable profile (no walk-up hit, no default), but only on an
+/// interactive terminal.  Scripts and pipes see nothing.
+fn maybe_hint_no_profile(no_profile: bool) {
+    use std::io::IsTerminal as _;
+    if !no_profile {
+        return;
+    }
+    if !std::io::stderr().is_terminal() {
+        return;
+    }
+    eprintln!(
+        "{} no profile detected — run {} to bind this directory",
+        "ℹ".cyan().bold(),
+        "`cyolo profile init`".bold()
+    );
 }
 
 #[cfg(test)]

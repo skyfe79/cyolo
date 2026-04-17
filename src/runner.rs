@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::detect::ResolvedProfile;
@@ -51,6 +51,30 @@ pub fn run_claude(args: &[String], resolved: Option<&ResolvedProfile>) -> Result
         Some(0) => Ok(()),
         Some(code) => Err(CyoloError::NonZeroExit(code)),
         None => Err(CyoloError::NonZeroExit(1)), // killed by signal
+    }
+}
+
+/// Spawn `claude` with `CLAUDE_CONFIG_DIR=<config_dir>` for interactive OAuth
+/// login into a specific profile.
+///
+/// Omits `--dangerously-skip-permissions` so the inner Claude Code prompt can
+/// run `/login` normally. Claude Code hashes `CLAUDE_CONFIG_DIR` into its
+/// keychain service name (`Claude Code-credentials-<sha256[:8]>`), so each
+/// profile's token lands in a distinct Keychain entry.
+pub fn run_claude_login(config_dir: &Path) -> Result<(), CyoloError> {
+    let claude = find_claude()?;
+    let status = Command::new(&claude)
+        .env("CLAUDE_CONFIG_DIR", config_dir)
+        .status()
+        .map_err(|e| CyoloError::ClaudeExecFailed {
+            path: claude.clone(),
+            source: e,
+        })?;
+
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err(CyoloError::NonZeroExit(code)),
+        None => Err(CyoloError::NonZeroExit(1)),
     }
 }
 
