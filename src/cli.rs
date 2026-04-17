@@ -45,8 +45,34 @@ pub fn route() -> Result<(), CyoloError> {
             Ok(())
         }
         Command::Claude(args) => {
-            let resolved = detect::resolve_profile()?;
-            maybe_hint_no_profile(resolved.is_none());
+            let mut resolved = detect::resolve_profile()?;
+            // Scope: only fire the picker when the user typed a bare `cyolo`
+            // (no args) on an interactive terminal and nothing resolved.
+            // `cyolo -p "..."` or any pass-through invocation stays silent.
+            let show_picker =
+                resolved.is_none() && args.is_empty() && profile::is_interactive();
+            if show_picker {
+                match profile::interactive_init_menu() {
+                    Ok(profile::PickerOutcome::MarkerWritten) => {
+                        // Re-resolve so the brand-new marker is honoured on
+                        // this very same invocation — no second `cyolo` call.
+                        resolved = detect::resolve_profile()?;
+                    }
+                    Ok(profile::PickerOutcome::NewProfileRegistered) => {
+                        // `add` already ran `claude /login` interactively.
+                        // Launching another claude session here would surprise
+                        // the user with a back-to-back double launch — bail.
+                        return Ok(());
+                    }
+                    Ok(profile::PickerOutcome::Quit) => {
+                        // Fall through: launch claude with no profile, matching
+                        // the original `cyolo()` zsh-function pass-through.
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                maybe_hint_no_profile(resolved.is_none());
+            }
             runner::run_claude(&args, resolved.as_ref())
         }
     }

@@ -264,20 +264,46 @@ Selection: 2
 Created .claude-profile.json (profile: work)
 ```
 
-### Heads-up when nothing is bound
+### Interactive picker when nothing is bound
 
-Running bare `cyolo` in a directory that has no profile resolved (no
-walk-up `.claude-profile.json`, no default, no inline `config_dir`) prints
-a one-line stderr hint before continuing, so you know where to go next:
+Running a **bare** `cyolo` (no args) in a directory with no resolved profile
+(no walk-up `.claude-profile.json`, no default, no inline `config_dir`) now
+drops you into the same picker that `cyolo profile init` uses. You can
+bind the directory to a profile in one step instead of aborting and re-running:
 
 ```
 $ cyolo
-ℹ no profile detected — run `cyolo profile init` to bind this directory
-(claude starts with unset CLAUDE_CONFIG_DIR — same as invoking `claude` directly)
+ℹ no profile is bound to this directory. Pick one:
+
+  1) personal  skyfe79@gmail.com
+  2) work      work@example.com
+  n) new    register a new profile + /login
+  q) quit   do nothing
+
+Selection: 2
+Created .claude-profile.json (profile: work)
+↳ added .claude-profile.json to /Users/you/repo/.git/info/exclude
+# claude --dangerously-skip-permissions launches with CLAUDE_CONFIG_DIR=~/.claude-work
 ```
 
-The hint is only shown when stderr is a TTY; piped / redirected invocations
-stay silent.
+Details:
+
+- **Scope**: only bare `cyolo` triggers the picker. Pass-through invocations
+  (`cyolo -p "..."`, `cyolo --version`, etc.) stay out of your way.
+- **TTY only**: without an interactive stdin/stdout, the picker is skipped
+  and a one-line stderr hint is printed instead (`ℹ no profile detected — run
+  \`cyolo profile init\` to bind this directory`), preserving scriptable behavior.
+- **Auto-excluded from git**: when the current directory sits inside a git
+  repository (including a worktree or submodule), `.claude-profile.json` is
+  appended to `<gitdir>/info/exclude` so it stays untracked without editing
+  the committed `.gitignore`. Idempotent — re-running does nothing if the
+  entry is already there. This applies to both the picker flow and any
+  explicit `cyolo profile init <name>`.
+- **Quit** (`q`): no marker is written; `claude` still launches with an unset
+  `CLAUDE_CONFIG_DIR`, matching the original `cyolo()` shell function.
+- **New** (`n`): `add` registers a fresh profile and launches `claude /login`
+  so you can authenticate. When that session exits, cyolo stops — run `cyolo`
+  again to start a working session with the new profile.
 
 ### current
 
@@ -353,6 +379,12 @@ At every invocation `cyolo` searches the current directory upward for
 found wins. Without one, the default profile is used; without a default,
 `CLAUDE_CONFIG_DIR` is left unset and Claude Code falls back to
 `~/.claude` (matching the original `cyolo()` shell function exactly).
+
+Exception: a **bare interactive** `cyolo` invocation with no resolved
+profile and no default intercepts that last step with the picker described
+in *Interactive picker when nothing is bound*. Pass-through invocations
+(`cyolo <args...>`, non-TTY stdin/stdout) keep the silent `~/.claude`
+fallback.
 
 ### Symlink-based sharing
 
