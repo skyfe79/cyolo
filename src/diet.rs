@@ -36,7 +36,7 @@ pub(crate) struct DietOptions {
 }
 
 /// A project entry in `~/.claude.json` whose filesystem path no longer exists.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct OrphanedProject {
     /// Absolute filesystem path from the `~/.claude.json` projects key.
     pub path: String,
@@ -904,16 +904,54 @@ fn atomic_write_json(path: &Path, content: &str) -> Result<(), CyoloError> {
     Ok(())
 }
 
-/// Remove orphaned project entries from the parsed JSON and write back to disk.
+/// Clear history arrays for stale projects in memory.
+///
+/// For each path in `stale_paths`, sets `parsed_json["projects"][path]["history"]`
+/// to an empty array if the existing value is an array. Warns to stderr and skips
+/// if the value is not an array. Does NOT write to disk — the caller is responsible
+/// for persisting the mutation.
+pub(crate) fn clear_stale_history(
+    parsed_json: &mut serde_json::Value,
+    stale_paths: &[String],
+) {
+    let projects = match parsed_json
+        .get_mut("projects")
+        .and_then(|v| v.as_object_mut())
+    {
+        Some(obj) => obj,
+        None => return,
+    };
+
+    for path in stale_paths {
+        let entry = match projects.get_mut(path.as_str()) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let history = match entry.get_mut("history") {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if history.is_array() {
+            *history = serde_json::Value::Array(vec![]);
+        } else {
+            eprintln!(
+                "warning: history for {} is not an array, skipping",
+                path
+            );
+        }
+    }
+}
+
+/// Remove orphaned project entries from the parsed JSON (in-memory only).
 ///
 /// Uses `serde_json::Map::retain` with a `HashSet` for O(1) lookup.
-/// The file is written atomically via `atomic_write_json()` to prevent
-/// corruption on crash.
+/// Does NOT write to disk — the caller is responsible for persisting the mutation.
 pub(crate) fn remove_orphaned_entries(
     parsed_json: &mut serde_json::Value,
     orphaned_paths: &[String],
-    claude_json_path: &Path,
-) -> Result<(), CyoloError> {
+) {
     let orphaned_set: HashSet<&str> = orphaned_paths.iter().map(|s| s.as_str()).collect();
 
     if let Some(projects) = parsed_json
@@ -922,16 +960,6 @@ pub(crate) fn remove_orphaned_entries(
     {
         projects.retain(|key, _| !orphaned_set.contains(key.as_str()));
     }
-
-    let serialized =
-        serde_json::to_string_pretty(parsed_json).map_err(|e| CyoloError::ConfigIoError {
-            context: format!("failed to serialize JSON for {}", claude_json_path.display()),
-            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
-
-    atomic_write_json(claude_json_path, &serialized)?;
-
-    Ok(())
 }
 
 /// Remove orphaned session folders with symlink safety.
@@ -994,45 +1022,6 @@ pub(crate) fn remove_session_folders(
     }
 
     Ok((removed_count, bytes_freed))
-}
-
-/// Execute the cleanup: backup, remove orphaned entries, remove session folders.
-///
-/// Prints a summary of actions taken.
-pub(crate) fn apply(
-    report: &DietReport,
-    parsed_json: &mut serde_json::Value,
-    claude_json_path: &Path,
-) -> Result<(), CyoloError> {
-    // Step 1: Backup
-    let backup_path = backup_claude_json(claude_json_path)?;
-    println!(
-        "Backed up to {}",
-        tilde_path(&backup_path.to_string_lossy())
-    );
-    rotate_backups(claude_json_path, 5)?;
-
-    // Step 2: Remove orphaned entries from JSON
-    let orphaned_paths: Vec<String> = report
-        .orphaned_projects
-        .iter()
-        .map(|o| o.path.clone())
-        .collect();
-    remove_orphaned_entries(parsed_json, &orphaned_paths, claude_json_path)?;
-    println!(
-        "Removed {} orphaned project entries",
-        report.orphaned_projects.len()
-    );
-
-    // Step 3: Remove orphaned session folders
-    let (removed_count, bytes_freed) = remove_session_folders(&report.orphaned_sessions)?;
-    println!(
-        "Removed {} orphaned session folders ({} freed)",
-        removed_count,
-        format_size(bytes_freed)
-    );
-
-    Ok(())
 }
 
 /// Parse CLI arguments for the `diet` subcommand.
@@ -1171,7 +1160,12 @@ fn resolve_profiles_from_config(
 
 /// Entry point for the `diet` subcommand.
 ///
-/// Orchestrates the full pipeline: parse args → analyze → scan → report → apply.
+/// Orchestrates the full pipeline:
+/// 1. Parse args → safety check → resolve profiles
+/// 2. Parse `~/.claude.json` once (shared across all profiles)
+/// 3. FOR each profile: orphan analysis, stale detection, cache measurement, session scan, report
+/// 4. IF apply (after loop): backup, rotate, mutate JSON (orphans + stale), single atomic write,
+///    then per-profile session/cache cleanup
 pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     let options = parse_diet_args(args)?;
 
@@ -1180,49 +1174,165 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         return Err(CyoloError::NonZeroExit(1));
     }
 
-    let (home, claude_home) = resolve_claude_home()?;
-    let claude_json_path = home.join(".claude.json");
-    let projects_dir = claude_home.join("projects");
+    // Resolve target profiles.
+    let profiles = resolve_target_profiles(&options)?;
+    let multi_profile = profiles.len() > 1;
 
+    // ~/.claude.json is always at $HOME/.claude.json regardless of profile.
+    let home = dirs::home_dir().ok_or_else(|| CyoloError::ConfigIoError {
+        context: "could not determine home directory".into(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found"),
+    })?;
+    let claude_json_path = home.join(".claude.json");
     let mut analysis = analyze_claude_json(&claude_json_path)?;
 
-    let orphaned_paths: Vec<String> = analysis
-        .orphaned_projects
-        .iter()
-        .map(|p| p.path.clone())
-        .collect();
-    let (sessions, session_dir_total_size) =
-        scan_session_folders(&projects_dir, &orphaned_paths);
+    // Accumulators for the post-loop apply phase.
+    let mut all_orphaned_paths: Vec<String> = Vec::new();
+    let mut all_orphaned_sessions: Vec<OrphanedSession> = Vec::new();
+    // Track stale paths per profile: only clear history when stale in ALL profiles.
+    let mut stale_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let profile_count = profiles.len();
 
-    let stale_projects = if let Some(days) = options.stale_days {
-        detect_stale_projects(&analysis.parsed_json, &projects_dir, days)
-    } else {
-        Vec::new()
-    };
+    for (name, claude_home) in &profiles {
+        if multi_profile {
+            println!("--- profile: {} ({}) ---", name, tilde_path(&claude_home.to_string_lossy()));
+        }
 
-    let cache_dirs = if options.cache {
-        measure_cache_dirs(&claude_home)
-    } else {
-        Vec::new()
-    };
+        let projects_dir = claude_home.join("projects");
 
-    let report = DietReport {
-        orphaned_projects: analysis.orphaned_projects,
-        orphaned_sessions: sessions,
-        stale_projects,
-        cache_dirs,
-        active_project_count: analysis.active_count,
-        config_file_size: analysis.config_file_size,
-        session_dir_total_size,
-        claude_home,
-    };
+        // Orphan analysis: filter from the shared JSON analysis.
+        let orphaned_paths: Vec<String> = analysis
+            .orphaned_projects
+            .iter()
+            .map(|p| p.path.clone())
+            .collect();
+        let (sessions, session_dir_total_size) =
+            scan_session_folders(&projects_dir, &orphaned_paths);
 
-    // Always show the dry-run report first; show "Cleanup complete." only after
-    // apply() succeeds so a failed cleanup never prints a success footer.
-    print_report(&report, false);
+        // Stale project detection (per-profile session dirs).
+        let stale_projects = if let Some(days) = options.stale_days {
+            detect_stale_projects(&analysis.parsed_json, &projects_dir, days)
+        } else {
+            Vec::new()
+        };
 
+        // Cache measurement (per-profile claude home).
+        let cache_dirs = if options.cache {
+            measure_cache_dirs(claude_home)
+        } else {
+            Vec::new()
+        };
+
+        // Accumulate orphaned paths (deduplicated).
+        for path in &orphaned_paths {
+            if !all_orphaned_paths.contains(path) {
+                all_orphaned_paths.push(path.clone());
+            }
+        }
+        // Count how many profiles see each project as stale.
+        for stale in &stale_projects {
+            *stale_counts.entry(stale.path.clone()).or_insert(0) += 1;
+        }
+
+        let report = DietReport {
+            orphaned_projects: analysis.orphaned_projects.clone(),
+            orphaned_sessions: sessions,
+            stale_projects,
+            cache_dirs,
+            active_project_count: analysis.active_count,
+            config_file_size: analysis.config_file_size,
+            session_dir_total_size,
+            claude_home: claude_home.clone(),
+        };
+
+        print_report(&report, false);
+
+        if options.apply {
+            // Per-profile cleanup: cache contents and stale session folders.
+            if !report.cache_dirs.is_empty() {
+                let (cache_removed, cache_freed) = remove_cache_contents(&report.cache_dirs)?;
+                println!(
+                    "Cleared {} cache dirs ({} freed)",
+                    cache_removed,
+                    format_size(cache_freed)
+                );
+            }
+
+            // Remove stale session folders (per-profile projects dir).
+            for stale in &report.stale_projects {
+                let session_name = project_path_to_session_dir(&stale.path);
+                let session_path = projects_dir.join(&session_name);
+                if session_path.is_dir() {
+                    if let Err(e) = fs::remove_dir_all(&session_path) {
+                        eprintln!(
+                            "warning: failed to remove stale session {}: {}",
+                            session_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+
+            // Accumulate orphaned sessions for post-loop removal.
+            all_orphaned_sessions.extend(report.orphaned_sessions);
+        }
+    }
+
+    // Post-loop apply: single atomic write for shared ~/.claude.json mutations.
     if options.apply {
-        apply(&report, &mut analysis.parsed_json, &claude_json_path)?;
+        // Only clear history for projects stale in ALL targeted profiles.
+        let all_stale_paths: Vec<String> = stale_counts
+            .into_iter()
+            .filter(|&(_, count)| count >= profile_count)
+            .map(|(path, _)| path)
+            .collect();
+
+        let has_json_mutations = !all_orphaned_paths.is_empty() || !all_stale_paths.is_empty();
+
+        // Only backup/write if ~/.claude.json exists and there are mutations.
+        if has_json_mutations && analysis.parsed_json != serde_json::Value::Null {
+            let backup_path = backup_claude_json(&claude_json_path)?;
+            println!(
+                "Backed up to {}",
+                tilde_path(&backup_path.to_string_lossy())
+            );
+            rotate_backups(&claude_json_path, 5)?;
+
+            // In-memory mutations on the shared JSON.
+            remove_orphaned_entries(&mut analysis.parsed_json, &all_orphaned_paths);
+            if !all_orphaned_paths.is_empty() {
+                println!("Removed {} orphaned project entries", all_orphaned_paths.len());
+            }
+
+            clear_stale_history(&mut analysis.parsed_json, &all_stale_paths);
+            if !all_stale_paths.is_empty() {
+                println!("Cleared history for {} stale projects", all_stale_paths.len());
+            }
+
+            // Single atomic write.
+            let serialized =
+                serde_json::to_string_pretty(&analysis.parsed_json).map_err(|e| {
+                    CyoloError::ConfigIoError {
+                        context: format!(
+                            "failed to serialize JSON for {}",
+                            claude_json_path.display()
+                        ),
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+                    }
+                })?;
+            atomic_write_json(&claude_json_path, &serialized)?;
+        }
+
+        // Remove orphaned session folders.
+        let (removed_count, bytes_freed) = remove_session_folders(&all_orphaned_sessions)?;
+        if removed_count > 0 {
+            println!(
+                "Removed {} orphaned session folders ({} freed)",
+                removed_count,
+                format_size(bytes_freed)
+            );
+        }
+
         println!("Cleanup complete.");
     }
 
@@ -1745,8 +1855,6 @@ mod tests {
 
     #[test]
     fn test_remove_entries_preserves_other_fields() {
-        let dir = TempDir::new().unwrap();
-        let json_path = dir.path().join("claude.json");
         let content = r#"{
   "version": "1.0",
   "projects": {
@@ -1756,39 +1864,155 @@ mod tests {
   },
   "settings": {"theme": "dark"}
 }"#;
-        fs::write(&json_path, content).unwrap();
-
         let mut parsed: serde_json::Value = serde_json::from_str(content).unwrap();
         let orphaned = vec!["/orphan/one".to_string(), "/orphan/two".to_string()];
 
-        remove_orphaned_entries(&mut parsed, &orphaned, &json_path).unwrap();
+        remove_orphaned_entries(&mut parsed, &orphaned);
 
-        // Verify on-disk file
-        let written: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
-        // Orphans removed
-        let projects = written["projects"].as_object().unwrap();
+        // Verify in-memory mutation
+        let projects = parsed["projects"].as_object().unwrap();
         assert_eq!(projects.len(), 1);
         assert!(projects.contains_key("/active/project"));
         assert!(!projects.contains_key("/orphan/one"));
         assert!(!projects.contains_key("/orphan/two"));
         // Other top-level fields preserved
-        assert_eq!(written["version"], "1.0");
-        assert_eq!(written["settings"]["theme"], "dark");
+        assert_eq!(parsed["version"], "1.0");
+        assert_eq!(parsed["settings"]["theme"], "dark");
     }
 
     #[test]
     fn test_remove_entries_no_projects_key() {
-        let dir = TempDir::new().unwrap();
-        let json_path = dir.path().join("claude.json");
         let content = r#"{"version": "1.0"}"#;
-        fs::write(&json_path, content).unwrap();
-
         let mut parsed: serde_json::Value = serde_json::from_str(content).unwrap();
         let orphaned = vec!["/orphan/one".to_string()];
 
         // Should succeed without error (no-op)
-        remove_orphaned_entries(&mut parsed, &orphaned, &json_path).unwrap();
+        remove_orphaned_entries(&mut parsed, &orphaned);
+    }
+
+    #[test]
+    fn test_remove_entries_no_disk_write() {
+        // Verify that remove_orphaned_entries is purely in-memory:
+        // mutate the JSON, then check the in-memory value (no file path needed).
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/keep/this": {"name": "keeper"},
+                "/remove/this": {"name": "goner"}
+            }
+        });
+        let orphaned = vec!["/remove/this".to_string()];
+
+        remove_orphaned_entries(&mut parsed, &orphaned);
+
+        let projects = parsed["projects"].as_object().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert!(projects.contains_key("/keep/this"));
+        assert!(!projects.contains_key("/remove/this"));
+    }
+
+    // ── clear_stale_history tests ─────────────────────────────────
+
+    #[test]
+    fn test_clear_stale_history_basic() {
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/stale/one": {"history": ["cmd1", "cmd2", "cmd3"]},
+                "/active/two": {"history": ["recent"]}
+            }
+        });
+
+        let stale_paths = vec!["/stale/one".to_string()];
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        // Stale path's history should be cleared.
+        let stale_history = parsed["projects"]["/stale/one"]["history"].as_array().unwrap();
+        assert!(stale_history.is_empty());
+
+        // Active path's history should be untouched.
+        let active_history = parsed["projects"]["/active/two"]["history"].as_array().unwrap();
+        assert_eq!(active_history.len(), 1);
+    }
+
+    #[test]
+    fn test_clear_stale_history_preserves_entry() {
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/stale/proj": {
+                    "name": "my-project",
+                    "history": ["old-cmd"],
+                    "settings": {"key": "value"}
+                }
+            }
+        });
+
+        let stale_paths = vec!["/stale/proj".to_string()];
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        // Project entry still exists with other fields preserved.
+        let proj = &parsed["projects"]["/stale/proj"];
+        assert_eq!(proj["name"], "my-project");
+        assert_eq!(proj["settings"]["key"], "value");
+        // Only history is cleared.
+        assert!(proj["history"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_clear_stale_history_non_array() {
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/bad/proj": {"history": "not-an-array"}
+            }
+        });
+
+        let stale_paths = vec!["/bad/proj".to_string()];
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        // history should remain unchanged (not an array, so skipped).
+        assert_eq!(parsed["projects"]["/bad/proj"]["history"], "not-an-array");
+    }
+
+    #[test]
+    fn test_clear_stale_history_missing_path() {
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/exists/proj": {"history": ["cmd1"]}
+            }
+        });
+
+        // Path not in JSON — no error.
+        let stale_paths = vec!["/nonexistent/proj".to_string()];
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        // Existing project should be untouched.
+        let history = parsed["projects"]["/exists/proj"]["history"].as_array().unwrap();
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn test_clear_stale_history_no_history_key() {
+        let mut parsed: serde_json::Value = serde_json::json!({
+            "projects": {
+                "/no-history/proj": {"name": "proj-without-history"}
+            }
+        });
+
+        let stale_paths = vec!["/no-history/proj".to_string()];
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        // Project should be untouched (no history key to clear).
+        assert_eq!(parsed["projects"]["/no-history/proj"]["name"], "proj-without-history");
+        assert!(parsed["projects"]["/no-history/proj"].get("history").is_none());
+    }
+
+    #[test]
+    fn test_clear_stale_history_no_projects_key() {
+        let mut parsed: serde_json::Value = serde_json::json!({"version": "1.0"});
+        let stale_paths = vec!["/some/path".to_string()];
+
+        // Should not panic or error.
+        clear_stale_history(&mut parsed, &stale_paths);
+
+        assert_eq!(parsed["version"], "1.0");
     }
 
     // ── atomic_write_json tests ─────────────────────────────────
