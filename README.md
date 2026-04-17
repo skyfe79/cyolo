@@ -20,11 +20,24 @@ and (on `--apply`) reclaims the orphaned data.
 
 ## Installation
 
-`cyolo` is a single Rust binary. From a clone of this repository:
+`cyolo` is a single Rust binary. From a clone of this repository, either use
+the install script (a thin wrapper that runs the cargo command below and
+reports on `~/.cargo/bin` PATH status):
+
+```bash
+./install.sh            # release build
+./install.sh --debug    # dev build (faster, unoptimized)
+./install.sh --locked   # pin to Cargo.lock (CI-friendly)
+```
+
+or invoke cargo directly:
 
 ```bash
 cargo install --path .
 ```
+
+Both drop the binary into `~/.cargo/bin/cyolo`. `~/.cyolo/` is used only for
+config and profile directories, not the binary.
 
 **MSRV: Rust 1.85+ is required** (the crate uses `edition = "2024"`). Check
 with `rustc --version`; upgrade via `rustup update stable` if needed.
