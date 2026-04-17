@@ -447,6 +447,23 @@ pub(crate) enum MenuChoice {
     Invalid,
 }
 
+/// Outcome of [`interactive_init_menu`] — distinguishes the "already launched
+/// claude during the picker" case from the "just wrote a marker" case so a
+/// caller that was about to run claude itself (bare `cyolo`) can avoid a
+/// surprise double-launch.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PickerOutcome {
+    /// User picked an existing registered profile; `.claude-profile.json` was
+    /// written. Caller should re-resolve and launch claude normally.
+    MarkerWritten,
+    /// User chose "new": a fresh profile was registered and `claude /login`
+    /// was already launched (and exited) inside `add()`, and then the marker
+    /// was written. Caller should **not** launch claude again.
+    NewProfileRegistered,
+    /// User quit without doing anything. No marker written.
+    Quit,
+}
+
 /// Parse one line of user input from the interactive init menu.
 ///
 /// Accepts:
@@ -498,6 +515,11 @@ fn read_line_trimmed() -> Result<String, CyoloError> {
 
 /// Write `.claude-profile.json` in the current working directory pointing at
 /// `name`.  Fails when a file or symlink already exists at that path.
+///
+/// As a best-effort side effect, when the directory is inside a git repo we
+/// append `.claude-profile.json` to `<gitdir>/info/exclude` so the marker
+/// stays untracked without modifying the committed `.gitignore`. Failures
+/// here are swallowed — marker creation succeeds either way.
 fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
     let cwd = std::env::current_dir().map_err(|e| CyoloError::ConfigIoError {
         context: "could not determine current directory".into(),
@@ -537,15 +559,31 @@ fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
         ".claude-profile.json".green(),
         name.green()
     );
+
+    // Best-effort: mark the file as git-ignored via <gitdir>/info/exclude so
+    // we do not require the user to edit the committed `.gitignore`.
+    if let Some(gitdir) = crate::git::find_gitdir(&cwd)
+        && let Ok(true) = crate::git::ensure_exclude_entry(&gitdir, ".claude-profile.json")
+    {
+        println!(
+            "{} added {} to {}",
+            "↳".dimmed(),
+            ".claude-profile.json".dimmed(),
+            format!("{}/info/exclude", gitdir.display()).dimmed()
+        );
+    }
+
     Ok(())
 }
 
-/// Show the interactive profile picker for `cyolo profile init`.
+/// Show the interactive profile picker for `cyolo profile init` and the
+/// auto-picker fired by bare `cyolo` in an unbound directory.
 ///
-/// Caller must have confirmed we are on a TTY.  Returns `Ok(())` even on a
-/// `Quit` so the user can bail out without a non-zero exit; real failures
-/// (registration, marker write) propagate as errors.
-fn interactive_init_menu() -> Result<(), CyoloError> {
+/// Caller must have confirmed we are on a TTY. Returns a [`PickerOutcome`]
+/// that describes what (if anything) was done so the caller can decide
+/// whether to fall through and launch `claude`. Real failures (registration,
+/// marker write) still propagate as errors.
+pub(crate) fn interactive_init_menu() -> Result<PickerOutcome, CyoloError> {
     let cfg = CyoloConfig::load()?;
 
     // Sorted profile names for stable indexing across invocations.
@@ -584,7 +622,10 @@ fn interactive_init_menu() -> Result<(), CyoloError> {
 
     let raw = read_line_trimmed()?;
     match parse_menu_input(&raw, names.len()) {
-        MenuChoice::Pick(i) => write_profile_marker(&names[i]),
+        MenuChoice::Pick(i) => {
+            write_profile_marker(&names[i])?;
+            Ok(PickerOutcome::MarkerWritten)
+        }
         MenuChoice::New => {
             print!("{} ", "Name for new profile:".bold());
             std::io::stdout().flush().ok();
@@ -593,12 +634,16 @@ fn interactive_init_menu() -> Result<(), CyoloError> {
                 eprintln!("{} profile name cannot be empty", "error:".red().bold());
                 return Err(CyoloError::NonZeroExit(1));
             }
+            // `add` registers the profile *and* (unless `--no-login`) launches
+            // claude for `/login`. The login session is a blocking, interactive
+            // run of claude, so the caller of this picker must not double-launch.
             add(&[new_name.clone()])?;
-            write_profile_marker(&new_name)
+            write_profile_marker(&new_name)?;
+            Ok(PickerOutcome::NewProfileRegistered)
         }
         MenuChoice::Quit => {
             println!("{}", "No change. Run `cyolo profile init <name>` when ready.".dimmed());
-            Ok(())
+            Ok(PickerOutcome::Quit)
         }
         MenuChoice::Invalid => {
             eprintln!(
@@ -630,7 +675,10 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
             Some(default_name) => default_name.clone(),
             None => {
                 if is_interactive() {
-                    return interactive_init_menu();
+                    // `profile init` only cares whether the picker returns
+                    // cleanly; the caller in cli.rs inspects the outcome.
+                    interactive_init_menu()?;
+                    return Ok(());
                 }
                 eprintln!(
                     "{} no profile name given and no default profile set",
