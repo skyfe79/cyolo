@@ -3,6 +3,11 @@ name = "cyolo"
 version = "0.1.0"
 edition = "2024"
 description = "Claude Code multi-account manager and config maintenance CLI"
+license = "MIT"
+repository = "https://github.com/skyfe79/cyolo"
+readme = "README.md"
+keywords = ["claude", "cli", "profile", "config"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
