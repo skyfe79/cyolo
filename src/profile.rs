@@ -434,47 +434,78 @@ pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
     }
 }
 
-/// Create `.claude-profile.json` in the current working directory.
-///
-/// Resolves the profile name from the first positional argument, or
-/// falls back to `config.default`.  Validates that the name is
-/// registered before writing.  Refuses to overwrite an existing file.
-///
-/// Usage: `cyolo profile init [name]`
-pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
-    config::ensure_dir()?;
-    let cfg = CyoloConfig::load()?;
+/// What the interactive init menu resolved from the user's input line.
+#[derive(Debug, PartialEq)]
+pub(crate) enum MenuChoice {
+    /// Zero-based index into the sorted profile list.
+    Pick(usize),
+    /// Register a fresh profile then bind to it.
+    New,
+    /// Do nothing, exit cleanly.
+    Quit,
+    /// Input did not match any option.
+    Invalid,
+}
 
-    // Resolve profile name
-    let name = match args.len() {
-        0 => match &cfg.default {
-            Some(default_name) => default_name.clone(),
-            None => {
-                eprintln!("{} no profile name given and no default profile set", "error:".red().bold());
-                eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
-                return Err(CyoloError::NonZeroExit(1));
-            }
-        },
-        1 => args[0].clone(),
-        _ => {
-            eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
-            return Err(CyoloError::NonZeroExit(1));
-        }
-    };
-
-    // Validate the name exists in config.profiles
-    if !cfg.profiles.contains_key(&name) {
-        return Err(CyoloError::ProfileNotFound { name });
+/// Parse one line of user input from the interactive init menu.
+///
+/// Accepts:
+///   * `<digit>`     — 1-based index; returned as 0-based `Pick`
+///   * `n` / `new`   — `New`
+///   * `q` / `quit`  — `Quit`
+///   * empty line    — `Quit` (treat blank enter as "not now")
+///   * anything else — `Invalid`
+pub(crate) fn parse_menu_input(input: &str, profile_count: usize) -> MenuChoice {
+    let s = input.trim().to_lowercase();
+    if s.is_empty() || s == "q" || s == "quit" {
+        return MenuChoice::Quit;
     }
+    if s == "n" || s == "new" {
+        return MenuChoice::New;
+    }
+    if let Ok(n) = s.parse::<usize>()
+        && n >= 1
+        && n <= profile_count
+    {
+        return MenuChoice::Pick(n - 1);
+    }
+    MenuChoice::Invalid
+}
 
-    // Check if .claude-profile.json already exists in cwd (including broken symlinks)
+/// `true` when both stdin and stdout are connected to a terminal.
+///
+/// Gates interactive prompts: we never want to hang a CI run or a piped
+/// invocation (`cyolo profile init | tee ...`) waiting for stdin.
+pub(crate) fn is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
+/// Read a single trimmed line from stdin, returning an empty string on EOF.
+fn read_line_trimmed() -> Result<String, CyoloError> {
+    use std::io::BufRead as _;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| CyoloError::ConfigIoError {
+            context: "failed to read from stdin".into(),
+            source: e,
+        })?;
+    Ok(line.trim().to_owned())
+}
+
+/// Write `.claude-profile.json` in the current working directory pointing at
+/// `name`.  Fails when a file or symlink already exists at that path.
+fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
     let cwd = std::env::current_dir().map_err(|e| CyoloError::ConfigIoError {
         context: "could not determine current directory".into(),
         source: e,
     })?;
     let profile_path = cwd.join(".claude-profile.json");
 
-    // Use symlink_metadata to detect broken symlinks (exists() returns false for them)
+    // symlink_metadata catches broken symlinks (exists() returns false for them).
     if std::fs::symlink_metadata(&profile_path).is_ok() {
         eprintln!(
             "{} .claude-profile.json already exists in {}",
@@ -484,7 +515,6 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
         return Err(CyoloError::NonZeroExit(1));
     }
 
-    // Write atomically with create_new to avoid TOCTOU race
     let contents = serde_json::to_string_pretty(&serde_json::json!({"name": name}))
         .expect("JSON serialization of simple object cannot fail");
     use std::io::Write as _;
@@ -502,8 +532,127 @@ pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
             source: e,
         })?;
 
-    println!("Created {} (profile: {})", ".claude-profile.json".green(), name.green());
+    println!(
+        "Created {} (profile: {})",
+        ".claude-profile.json".green(),
+        name.green()
+    );
     Ok(())
+}
+
+/// Show the interactive profile picker for `cyolo profile init`.
+///
+/// Caller must have confirmed we are on a TTY.  Returns `Ok(())` even on a
+/// `Quit` so the user can bail out without a non-zero exit; real failures
+/// (registration, marker write) propagate as errors.
+fn interactive_init_menu() -> Result<(), CyoloError> {
+    let cfg = CyoloConfig::load()?;
+
+    // Sorted profile names for stable indexing across invocations.
+    let names: Vec<String> = cfg.profiles.keys().cloned().collect();
+
+    let width = names.iter().map(String::len).max().unwrap_or(0);
+
+    println!(
+        "{} no profile is bound to this directory. Pick one:",
+        "ℹ".cyan().bold()
+    );
+    println!();
+
+    if names.is_empty() {
+        println!("  {}", "(no profiles registered yet)".dimmed());
+    } else {
+        for (i, name) in names.iter().enumerate() {
+            let profile = &cfg.profiles[name];
+            let email = read_oauth_email(&profile.config_dir)
+                .map(|e| e.green().to_string())
+                .unwrap_or_else(|| "(needs login)".yellow().to_string());
+            println!(
+                "  {index}) {pad}  {email}",
+                index = (i + 1).to_string().bold(),
+                pad = format!("{name:<width$}").bold(),
+            );
+        }
+    }
+    println!("  {}) {}", "n".bold(), "new    register a new profile + /login");
+    println!("  {}) {}", "q".bold(), "quit   do nothing");
+    println!();
+
+    use std::io::Write as _;
+    print!("{} ", "Selection:".bold());
+    std::io::stdout().flush().ok();
+
+    let raw = read_line_trimmed()?;
+    match parse_menu_input(&raw, names.len()) {
+        MenuChoice::Pick(i) => write_profile_marker(&names[i]),
+        MenuChoice::New => {
+            print!("{} ", "Name for new profile:".bold());
+            std::io::stdout().flush().ok();
+            let new_name = read_line_trimmed()?;
+            if new_name.is_empty() {
+                eprintln!("{} profile name cannot be empty", "error:".red().bold());
+                return Err(CyoloError::NonZeroExit(1));
+            }
+            add(&[new_name.clone()])?;
+            write_profile_marker(&new_name)
+        }
+        MenuChoice::Quit => {
+            println!("{}", "No change. Run `cyolo profile init <name>` when ready.".dimmed());
+            Ok(())
+        }
+        MenuChoice::Invalid => {
+            eprintln!(
+                "{} unrecognized selection '{}'",
+                "error:".red().bold(),
+                raw.bold()
+            );
+            Err(CyoloError::NonZeroExit(1))
+        }
+    }
+}
+
+/// Create `.claude-profile.json` in the current working directory.
+///
+/// Resolution order:
+///   1. Name given as argument
+///   2. No args + default profile set → use default
+///   3. No args + no default + TTY → interactive menu
+///   4. No args + no default + non-TTY → error (unchanged, predictable for CI)
+///
+/// Usage: `cyolo profile init [name]`
+pub fn profile_init(args: &[String]) -> Result<(), CyoloError> {
+    config::ensure_dir()?;
+    let cfg = CyoloConfig::load()?;
+
+    // Resolve profile name
+    let name = match args.len() {
+        0 => match &cfg.default {
+            Some(default_name) => default_name.clone(),
+            None => {
+                if is_interactive() {
+                    return interactive_init_menu();
+                }
+                eprintln!(
+                    "{} no profile name given and no default profile set",
+                    "error:".red().bold()
+                );
+                eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
+                return Err(CyoloError::NonZeroExit(1));
+            }
+        },
+        1 => args[0].clone(),
+        _ => {
+            eprintln!("{} cyolo profile init <name>", "Usage:".yellow().bold());
+            return Err(CyoloError::NonZeroExit(1));
+        }
+    };
+
+    // Validate the name exists in config.profiles
+    if !cfg.profiles.contains_key(&name) {
+        return Err(CyoloError::ProfileNotFound { name });
+    }
+
+    write_profile_marker(&name)
 }
 
 /// Expand leading `~` or `~/` to the user's home directory.
@@ -650,5 +799,43 @@ mod tests {
         // filtered before the name lookup.
         assert!(add(&args(&["--no-login"])).is_err());
         assert!(add(&args(&["--no-share", "--no-login"])).is_err());
+    }
+
+    #[test]
+    fn test_parse_menu_input_pick_valid_index() {
+        assert_eq!(parse_menu_input("1", 3), MenuChoice::Pick(0));
+        assert_eq!(parse_menu_input("3", 3), MenuChoice::Pick(2));
+        assert_eq!(parse_menu_input("  2  ", 3), MenuChoice::Pick(1));
+    }
+
+    #[test]
+    fn test_parse_menu_input_rejects_out_of_range() {
+        assert_eq!(parse_menu_input("0", 3), MenuChoice::Invalid);
+        assert_eq!(parse_menu_input("4", 3), MenuChoice::Invalid);
+        // Empty list: every index must be Invalid.
+        assert_eq!(parse_menu_input("1", 0), MenuChoice::Invalid);
+    }
+
+    #[test]
+    fn test_parse_menu_input_new_aliases() {
+        assert_eq!(parse_menu_input("n", 2), MenuChoice::New);
+        assert_eq!(parse_menu_input("N", 2), MenuChoice::New);
+        assert_eq!(parse_menu_input("new", 2), MenuChoice::New);
+        assert_eq!(parse_menu_input("NEW", 2), MenuChoice::New);
+    }
+
+    #[test]
+    fn test_parse_menu_input_quit_aliases_and_empty() {
+        assert_eq!(parse_menu_input("q", 2), MenuChoice::Quit);
+        assert_eq!(parse_menu_input("quit", 2), MenuChoice::Quit);
+        assert_eq!(parse_menu_input("", 2), MenuChoice::Quit);
+        assert_eq!(parse_menu_input("   ", 2), MenuChoice::Quit);
+    }
+
+    #[test]
+    fn test_parse_menu_input_invalid_tokens() {
+        assert_eq!(parse_menu_input("x", 2), MenuChoice::Invalid);
+        assert_eq!(parse_menu_input("-1", 2), MenuChoice::Invalid);
+        assert_eq!(parse_menu_input("1.5", 2), MenuChoice::Invalid);
     }
 }

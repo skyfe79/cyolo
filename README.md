@@ -198,12 +198,51 @@ cyolo profile init [name]
 ```
 
 Write `.claude-profile.json` into the current directory so walk-up detection
-resolves to `name` from this tree. If `name` is omitted, the current default
-is used. Refuses to overwrite an existing file.
+resolves to `name` from this tree. Refuses to overwrite an existing file.
+
+Resolution order:
+
+1. `name` argument given → use it.
+2. No argument, default profile set → use the default.
+3. No argument, no default, running on a TTY → **interactive menu** shows
+   all registered profiles with their emails, plus `n` (register a new
+   profile and `/login`) and `q` (do nothing).
+4. No argument, no default, non-TTY → error (safe for CI / scripts).
 
 ```bash
-cyolo profile init work
+cyolo profile init work      # explicit
+cyolo profile init           # picks default, or pops the menu
 ```
+
+Menu example:
+
+```
+ℹ no profile is bound to this directory. Pick one:
+
+  1) personal  skyfe79@gmail.com
+  2) work      work@example.com
+  3) client-a  (needs login)
+  n) new    register a new profile + /login
+  q) quit   do nothing
+
+Selection: 2
+Created .claude-profile.json (profile: work)
+```
+
+### Heads-up when nothing is bound
+
+Running bare `cyolo` in a directory that has no profile resolved (no
+walk-up `.claude-profile.json`, no default, no inline `config_dir`) prints
+a one-line stderr hint before continuing, so you know where to go next:
+
+```
+$ cyolo
+ℹ no profile detected — run `cyolo profile init` to bind this directory
+(claude starts with unset CLAUDE_CONFIG_DIR — same as invoking `claude` directly)
+```
+
+The hint is only shown when stderr is a TTY; piped / redirected invocations
+stay silent.
 
 ### current
 
