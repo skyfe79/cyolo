@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -454,11 +455,60 @@ pub(crate) fn backup_claude_json(claude_json_path: &Path) -> Result<PathBuf, Cyo
     Ok(backup_path)
 }
 
+/// Write JSON content to a file atomically using temp-file + sync + rename.
+///
+/// Creates a temporary file (`.json.tmp` extension) in the same directory,
+/// writes `content`, calls `sync_all()` to flush to disk, then atomically
+/// renames over the target `path`. This prevents corruption if the process
+/// crashes mid-write. Mirrors the pattern used in `config.rs::save()`.
+fn atomic_write_json(path: &Path, content: &str) -> Result<(), CyoloError> {
+    let tmp_path = path.with_extension("json.tmp");
+
+    let mut file = fs::File::create(&tmp_path).map_err(|e| CyoloError::ConfigIoError {
+        context: format!("failed to create temp file {}", tmp_path.display()),
+        source: e,
+    })?;
+
+    file.write_all(content.as_bytes())
+        .map_err(|e| CyoloError::ConfigIoError {
+            context: format!("failed to write temp file {}", tmp_path.display()),
+            source: e,
+        })?;
+
+    file.sync_all().map_err(|e| CyoloError::ConfigIoError {
+        context: format!("failed to sync temp file {}", tmp_path.display()),
+        source: e,
+    })?;
+
+    fs::rename(&tmp_path, path).map_err(|e| CyoloError::ConfigIoError {
+        context: format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            path.display()
+        ),
+        source: e,
+    })?;
+
+    // Sync the parent directory so the rename is durable across power loss.
+    if let Some(parent) = path.parent() {
+        let dir = fs::File::open(parent).map_err(|e| CyoloError::ConfigIoError {
+            context: format!("failed to open parent dir {}", parent.display()),
+            source: e,
+        })?;
+        dir.sync_all().map_err(|e| CyoloError::ConfigIoError {
+            context: format!("failed to sync parent dir {}", parent.display()),
+            source: e,
+        })?;
+    }
+
+    Ok(())
+}
+
 /// Remove orphaned project entries from the parsed JSON and write back to disk.
 ///
 /// Uses `serde_json::Map::retain` with a `HashSet` for O(1) lookup.
-/// The file is written with `serde_json::to_string_pretty` + `fs::write`
-/// (simple write — atomic write is deferred to v7).
+/// The file is written atomically via `atomic_write_json()` to prevent
+/// corruption on crash.
 pub(crate) fn remove_orphaned_entries(
     parsed_json: &mut serde_json::Value,
     orphaned_paths: &[String],
@@ -479,10 +529,7 @@ pub(crate) fn remove_orphaned_entries(
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         })?;
 
-    fs::write(claude_json_path, serialized).map_err(|e| CyoloError::ConfigIoError {
-        context: format!("failed to write {}", claude_json_path.display()),
-        source: e,
-    })?;
+    atomic_write_json(claude_json_path, &serialized)?;
 
     Ok(())
 }
@@ -1222,6 +1269,48 @@ mod tests {
 
         // Should succeed without error (no-op)
         remove_orphaned_entries(&mut parsed, &orphaned, &json_path).unwrap();
+    }
+
+    // ── atomic_write_json tests ─────────────────────────────────
+
+    #[test]
+    fn test_atomic_write_json_basic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("output.json");
+        let content = r#"{"key": "value"}"#;
+
+        atomic_write_json(&path, content).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(written, content);
+    }
+
+    #[test]
+    fn test_atomic_write_json_no_leftover_tmp() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("output.json");
+        let tmp_path = path.with_extension("json.tmp");
+
+        atomic_write_json(&path, "test content").unwrap();
+
+        // The .json.tmp file should not remain after a successful write
+        assert!(!tmp_path.exists());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_atomic_write_json_overwrites_existing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("output.json");
+
+        // Write initial content
+        fs::write(&path, "old content").unwrap();
+
+        // Overwrite with atomic_write_json
+        atomic_write_json(&path, "new content").unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(written, "new content");
     }
 
     // ── remove_session_folders tests ───────────────────────────
