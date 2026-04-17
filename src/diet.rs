@@ -2,9 +2,22 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::CyoloError;
+
+/// Detect whether a Claude Code process is currently running.
+///
+/// Uses `pgrep -f "claude"` to check for any matching process.
+/// Returns `false` if `pgrep` is not available or fails to execute.
+pub(crate) fn is_claude_running() -> bool {
+    Command::new("pgrep")
+        .args(["-f", "claude"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
 
 /// Parsed CLI arguments for the `diet` subcommand.
 #[derive(Debug)]
@@ -1369,6 +1382,15 @@ mod tests {
         let args = vec!["--apply".to_string(), "--unknown".to_string()];
         let result = parse_diet_args(&args);
         assert!(result.is_err());
+    }
+
+    // ── is_claude_running tests ─────────────────────────────
+
+    #[test]
+    fn test_is_claude_running_returns_bool() {
+        // Verify the function compiles and returns a bool without panicking.
+        // Cannot deterministically test true/false since pgrep depends on runtime state.
+        let _result: bool = is_claude_running();
     }
 
     // ── dispatch error tests ──────────────────────────────────
