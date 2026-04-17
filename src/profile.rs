@@ -250,6 +250,51 @@ pub fn current(args: &[String]) -> Result<(), CyoloError> {
     Ok(())
 }
 
+/// Get, set, or clear the default profile.
+///
+/// - No args: print the current default profile name.
+/// - One arg (name): validate and set the default profile.
+/// - `--unset`: clear the default profile.
+///
+/// Usage: `cyolo profile default [name | --unset]`
+pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
+    config::ensure_dir()?;
+
+    match args.len() {
+        0 => {
+            let cfg = CyoloConfig::load()?;
+            match &cfg.default {
+                Some(name) => println!("Default profile: {name}"),
+                None => println!("No default profile set."),
+            }
+            Ok(())
+        }
+        1 => {
+            if args[0] == "--unset" {
+                let mut cfg = CyoloConfig::load()?;
+                cfg.default = None;
+                cfg.save()?;
+                println!("Default profile cleared.");
+                Ok(())
+            } else {
+                let name = &args[0];
+                let mut cfg = CyoloConfig::load()?;
+                if !cfg.profiles.contains_key(name) {
+                    return Err(CyoloError::ProfileNotFound { name: name.clone() });
+                }
+                cfg.default = Some(name.clone());
+                cfg.save()?;
+                println!("Default profile set to: {name}");
+                Ok(())
+            }
+        }
+        _ => {
+            eprintln!("Usage: cyolo profile default [name | --unset]");
+            Err(CyoloError::NonZeroExit(1))
+        }
+    }
+}
+
 /// Expand leading `~` or `~/` to the user's home directory.
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
