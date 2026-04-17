@@ -37,8 +37,7 @@ pub fn route() -> Result<(), CyoloError> {
         Command::Diet(args) => diet::dispatch(&args),
         Command::Claude(args) => {
             let resolved = detect::resolve_profile()?;
-            let config_dir = resolved.as_ref().map(|r| r.config_dir.as_path());
-            runner::run_claude(&args, config_dir)
+            runner::run_claude(&args, resolved.as_ref())
         }
     }
 }
