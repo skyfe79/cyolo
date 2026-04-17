@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::{self, CyoloConfig, Profile};
 use crate::error::CyoloError;
+use crate::runner;
 use crate::symlink;
 use owo_colors::OwoColorize;
 
@@ -14,25 +15,30 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("rm") | Some("remove") => rm(&args[1..]),
         Some("list") | Some("ls") => list(),
         Some("link") => link(&args[1..]),
+        Some("login") => login(&args[1..]),
         Some("current") => current(&args[1..]),
+        Some("whoami") => whoami(&args[1..]),
         Some("init") => profile_init(&args[1..]),
         Some("default") => profile_default(&args[1..]),
         None => {
-            println!("{} cyolo profile <add|rm|list|link|current|init|default>", "Usage:".yellow().bold());
+            println!("{} cyolo profile <add|rm|list|link|login|current|whoami|init|default>", "Usage:".yellow().bold());
             println!();
             println!("Commands:");
-            println!("  add <name> [config-dir] [--no-share]  Register a new profile");
+            println!("  add <name> [config-dir] [--no-share] [--no-login]");
+            println!("                           Register a new profile (auto-runs claude /login)");
             println!("  rm <name>                Remove a profile");
-            println!("  list                     List all profiles");
+            println!("  list                     List all profiles with email + login state");
             println!("  link <name>              Re-create shared symlinks for a profile");
+            println!("  login <name>             Re-run claude /login for a registered profile");
             println!("  current                  Show the currently active profile");
+            println!("  whoami                   Show active profile + email from its .claude.json");
             println!("  init [name]              Create .claude-profile.json in current directory");
             println!("  default [name|--unset]   Get/set/clear the default profile");
             Ok(())
         }
         Some(cmd) => {
             eprintln!("{} unknown profile command '{}'", "error:".red().bold(), cmd.bold());
-            eprintln!("{}", "Available: add, rm, list, link, current, init, default".dimmed());
+            eprintln!("{}", "Available: add, rm, list, link, login, current, whoami, init, default".dimmed());
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -42,12 +48,19 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
 ///
 /// Usage: `cyolo profile add <name> [config-dir] [--no-share]`
 pub fn add(args: &[String]) -> Result<(), CyoloError> {
-    // Parse --no-share flag (position-independent)
+    // Parse flags (position-independent)
     let no_share = args.iter().any(|a| a == "--no-share");
-    let positional: Vec<&String> = args.iter().filter(|a| a.as_str() != "--no-share").collect();
+    let no_login = args.iter().any(|a| a == "--no-login");
+    let positional: Vec<&String> = args
+        .iter()
+        .filter(|a| a.as_str() != "--no-share" && a.as_str() != "--no-login")
+        .collect();
 
     let name = positional.first().ok_or_else(|| {
-        eprintln!("{} cyolo profile add <name> [config-dir] [--no-share]", "Usage:".yellow().bold());
+        eprintln!(
+            "{} cyolo profile add <name> [config-dir] [--no-share] [--no-login]",
+            "Usage:".yellow().bold()
+        );
         CyoloError::NonZeroExit(1)
     })?;
 
@@ -123,6 +136,28 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
         "(shared symlinks created)"
     };
     println!("Added profile: {} -> {} {}", name.green(), config_dir.display().to_string().green(), symlink_note);
+
+    // Auto-launch claude so the user can `/login` with the right OAuth account
+    // for this profile. Each distinct CLAUDE_CONFIG_DIR lands in its own
+    // Keychain entry (`Claude Code-credentials-<sha256[:8]>`), so the token
+    // captured here is scoped to this profile. Skipped when:
+    //   - user passes `--no-login`
+    //   - config_dir resolves to `~/.claude` (the source directory — nothing to
+    //     do because the default entry is already populated by prior usage)
+    if !no_login && !symlink::is_source_dir(&config_dir) {
+        println!();
+        println!(
+            "{} launching claude so you can run {} for this profile…",
+            "→".cyan().bold(),
+            "/login".bold()
+        );
+        println!(
+            "{}",
+            "  (skip this with --no-login on `cyolo profile add`)".dimmed()
+        );
+        runner::run_claude_login(&config_dir)?;
+    }
+
     Ok(())
 }
 
@@ -188,14 +223,113 @@ pub fn list() -> Result<(), CyoloError> {
     for (name, profile) in &cfg.profiles {
         let padded = format!("{name:<max_width$}");
         let dir = profile.config_dir.display();
+        let status = match read_oauth_email(&profile.config_dir) {
+            Some(email) => format!("{}", email.green()),
+            None => format!("{}", "(needs login)".yellow()),
+        };
         if cfg.default.as_deref() == Some(name.as_str()) {
-            println!("{} {} -> {}", "*".green().bold(), padded.bold(), dir);
+            println!("{} {} -> {}  {}", "*".green().bold(), padded.bold(), dir, status);
         } else {
-            println!("  {} -> {}", padded.bold(), dir);
+            println!("  {} -> {}  {}", padded.bold(), dir, status);
         }
     }
 
     Ok(())
+}
+
+/// Run `claude` with `CLAUDE_CONFIG_DIR` set to the profile's directory so the
+/// user can `/login` (or re-login) with the OAuth account bound to that profile.
+///
+/// Usage: `cyolo profile login <name>`
+pub fn login(args: &[String]) -> Result<(), CyoloError> {
+    if args.len() != 1 {
+        eprintln!("{} cyolo profile login <name>", "Usage:".yellow().bold());
+        return Err(CyoloError::NonZeroExit(1));
+    }
+    let name = &args[0];
+
+    config::ensure_dir()?;
+    let cfg = CyoloConfig::load()?;
+
+    let profile = cfg
+        .profiles
+        .get(name)
+        .ok_or_else(|| CyoloError::ProfileNotFound { name: name.clone() })?;
+
+    let config_dir = expand_tilde(&profile.config_dir.to_string_lossy());
+
+    println!(
+        "{} launching claude for profile {} — run {} inside",
+        "→".cyan().bold(),
+        name.green(),
+        "/login".bold()
+    );
+    runner::run_claude_login(&config_dir)
+}
+
+/// Show the active profile plus the email address from its `.claude.json`.
+///
+/// Unlike `current`, this reads the resolved profile's `.claude.json` and
+/// prints the `oauthAccount.emailAddress` so the user can verify which Anthropic
+/// account the Keychain entry currently holds a token for.
+///
+/// Usage: `cyolo profile whoami`
+pub fn whoami(args: &[String]) -> Result<(), CyoloError> {
+    if !args.is_empty() {
+        eprintln!("{} cyolo profile whoami", "Usage:".yellow().bold());
+        return Err(CyoloError::NonZeroExit(1));
+    }
+
+    let resolved = crate::detect::resolve_profile()?;
+    match resolved {
+        Some(profile) => {
+            if let Some(name) = &profile.name {
+                println!("{} {}", "profile:".bold(), name.green());
+            }
+            println!(
+                "{} {}",
+                "config_dir:".bold(),
+                profile.config_dir.display().to_string().green()
+            );
+            println!("{} {}", "source:".bold(), profile.source.green());
+
+            match read_oauth_email(&profile.config_dir) {
+                Some(email) => println!("{} {}", "email:".bold(), email.green()),
+                None => println!(
+                    "{} {}",
+                    "email:".bold(),
+                    "(needs login — run `cyolo profile login <name>`)".yellow()
+                ),
+            }
+        }
+        None => {
+            println!(
+                "{}",
+                "No profile detected. Using default Claude configuration (~/.claude).".dimmed()
+            );
+            if let Some(home) = dirs::home_dir() {
+                if let Some(email) = read_oauth_email(&home.join(".claude")) {
+                    println!("{} {}", "email:".bold(), email.green());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read `oauthAccount.emailAddress` from `<config_dir>/.claude.json` and
+/// return it when present.  Silently returns `None` if the file is missing,
+/// unreadable, or does not contain the expected nested field — this is a
+/// best-effort status read.
+fn read_oauth_email(config_dir: &std::path::Path) -> Option<String> {
+    let path = config_dir.join(".claude.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Re-create shared symlinks for an already-registered profile.
@@ -459,5 +593,62 @@ mod tests {
         setup();
         let result = profile_init(&args(&["a", "b"]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_login_requires_one_arg() {
+        setup();
+        assert!(login(&args(&[])).is_err());
+        assert!(login(&args(&["a", "b"])).is_err());
+    }
+
+    #[test]
+    fn test_whoami_rejects_extra_args() {
+        setup();
+        assert!(whoami(&args(&["unexpected"])).is_err());
+    }
+
+    #[test]
+    fn test_read_oauth_email_extracts_nested_field() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"oauthAccount":{"emailAddress":"test@example.com","accountUuid":"u"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_oauth_email(dir.path()),
+            Some("test@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_read_oauth_email_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_oauth_email(dir.path()), None);
+    }
+
+    #[test]
+    fn test_read_oauth_email_missing_oauth_account_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
+        assert_eq!(read_oauth_email(dir.path()), None);
+    }
+
+    #[test]
+    fn test_read_oauth_email_invalid_json_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".claude.json"), "not json").unwrap();
+        assert_eq!(read_oauth_email(dir.path()), None);
+    }
+
+    #[test]
+    fn test_add_rejects_missing_name() {
+        setup();
+        assert!(add(&args(&[])).is_err());
+        // Flag-only (no positional) must still fail, proving --no-login is
+        // filtered before the name lookup.
+        assert!(add(&args(&["--no-login"])).is_err());
+        assert!(add(&args(&["--no-share", "--no-login"])).is_err());
     }
 }
