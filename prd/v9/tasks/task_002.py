@@ -17,7 +17,7 @@ Also clean up src/error.rs by removing dead/unused variants:
 - Remove #[allow(dead_code)] from ProfileAlreadyExists, ProfileNotFound, ProfileFileError
   (these are now actively used and should not have dead_code suppression)
 - Remove the SymlinkError variant entirely (it is never constructed anywhere)""",
-    status="pending",
+    status="completed",
     agent="meta-agent",
     skills=[],
     mcp_tools=[],

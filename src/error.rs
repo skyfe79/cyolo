@@ -28,25 +28,12 @@ pub enum CyoloError {
         source: std::io::Error,
     },
 
-    #[allow(dead_code)]
     #[error("cyolo: profile '{name}' already exists")]
     ProfileAlreadyExists { name: String },
 
-    #[allow(dead_code)]
     #[error("cyolo: profile '{name}' not found. Run: cyolo profile add {name}")]
     ProfileNotFound { name: String },
 
-    #[allow(dead_code)]
     #[error("cyolo: invalid profile file {path}: {message}")]
     ProfileFileError { path: PathBuf, message: String },
-
-    #[allow(dead_code)]
-    #[error("cyolo: failed to symlink {item}: {source} -> {target}: {source_err}")]
-    SymlinkError {
-        item: String,
-        source: PathBuf,
-        target: PathBuf,
-        #[source]
-        source_err: std::io::Error,
-    },
 }

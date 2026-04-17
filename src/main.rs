@@ -8,7 +8,7 @@ mod runner;
 mod symlink;
 
 use error::CyoloError;
-use owo_colors::set_override;
+use owo_colors::{set_override, OwoColorize};
 use std::io::IsTerminal;
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
         match e {
             CyoloError::NonZeroExit(code) => std::process::exit(code),
             _ => {
-                eprintln!("{e}");
+                eprintln!("{} {e}", "error:".red().bold());
                 std::process::exit(1);
             }
         }
