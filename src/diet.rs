@@ -84,6 +84,10 @@ pub(crate) struct DietReport {
     pub orphaned_projects: Vec<OrphanedProject>,
     /// Session folders in `~/.claude/projects/` that map to orphaned projects.
     pub orphaned_sessions: Vec<OrphanedSession>,
+    /// Projects whose session files have not been modified within the staleness threshold.
+    pub stale_projects: Vec<StaleProject>,
+    /// Cache directories inside `~/.claude/` whose contents can be removed.
+    pub cache_dirs: Vec<CacheDir>,
     /// Number of projects whose paths still exist.
     pub active_project_count: usize,
     /// Total size of `~/.claude.json` in bytes.
@@ -551,8 +555,12 @@ fn tilde_path(path: &str) -> String {
 pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String {
     let claude_home_display = tilde_path(&report.claude_home.to_string_lossy());
 
-    // Special case: no orphans at all.
-    if report.orphaned_projects.is_empty() && report.orphaned_sessions.is_empty() {
+    // Special case: nothing to clean up at all.
+    if report.orphaned_projects.is_empty()
+        && report.orphaned_sessions.is_empty()
+        && report.stale_projects.is_empty()
+        && report.cache_dirs.is_empty()
+    {
         return format!(
             "cyolo diet — analyzing {claude_home_display}\n\n\
              No orphaned projects found. Nothing to clean up.\n"
@@ -624,6 +632,36 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
 
     writeln!(buf).unwrap();
 
+    // ── Stale projects section (after orphans) ─────────────────
+    if !report.stale_projects.is_empty() {
+        let stale_count = report.stale_projects.len();
+        let stale_history_total: u64 = report.stale_projects.iter().map(|s| s.history_size).sum();
+
+        writeln!(
+            buf,
+            "{:<45} {}  (history clearable)",
+            format!("stale projects ({stale_count}):"),
+            format_size(stale_history_total)
+        )
+        .unwrap();
+
+        for (i, stale) in report.stale_projects.iter().enumerate() {
+            let is_last = i == stale_count - 1;
+            let item_char = if is_last { "└─" } else { "├─" };
+            let days = stale.last_activity_secs / 86400;
+            writeln!(
+                buf,
+                "  {item_char} {:<30} last activity: {} days ago     {}",
+                tilde_path(&stale.path),
+                days,
+                format_size(stale.history_size)
+            )
+            .unwrap();
+        }
+
+        writeln!(buf).unwrap();
+    }
+
     // ── ~/.claude/projects/ section ─────────────────────────────
     writeln!(
         buf,
@@ -646,8 +684,48 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
 
     writeln!(buf).unwrap();
 
-    // Total reclaimable
-    let total_reclaimable = orphan_total_size + session_total_size;
+    // ── Cache directories section (after sessions) ─────────────
+    if !report.cache_dirs.is_empty() {
+        let cache_total: u64 = report.cache_dirs.iter().map(|c| c.size).sum();
+        let cache_count = report.cache_dirs.len();
+
+        writeln!(
+            buf,
+            "{:<45} {}",
+            format!("{claude_home_display}/cache:"),
+            format_size(cache_total)
+        )
+        .unwrap();
+
+        writeln!(
+            buf,
+            "  └─ {:<41} {}  (removable)",
+            format!("clearable cache dirs ({cache_count}):"),
+            format_size(cache_total)
+        )
+        .unwrap();
+
+        for (i, cache) in report.cache_dirs.iter().enumerate() {
+            let is_last = i == cache_count - 1;
+            let item_char = if is_last { "└─" } else { "├─" };
+            writeln!(
+                buf,
+                "      {item_char} {:<37} {}",
+                format!("{}/", cache.name),
+                format_size(cache.size)
+            )
+            .unwrap();
+        }
+
+        writeln!(buf).unwrap();
+    }
+
+    // Total reclaimable (all categories)
+    let stale_history_total: u64 = report.stale_projects.iter().map(|s| s.history_size).sum();
+    let stale_session_total: u64 = report.stale_projects.iter().map(|s| s.session_size).sum();
+    let cache_total: u64 = report.cache_dirs.iter().map(|c| c.size).sum();
+    let total_reclaimable =
+        orphan_total_size + session_total_size + stale_history_total + stale_session_total + cache_total;
     writeln!(buf, "Total reclaimable: {}", format_size(total_reclaimable)).unwrap();
     writeln!(buf).unwrap();
 
@@ -1116,9 +1194,23 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     let (sessions, session_dir_total_size) =
         scan_session_folders(&projects_dir, &orphaned_paths);
 
+    let stale_projects = if let Some(days) = options.stale_days {
+        detect_stale_projects(&analysis.parsed_json, &projects_dir, days)
+    } else {
+        Vec::new()
+    };
+
+    let cache_dirs = if options.cache {
+        measure_cache_dirs(&claude_home)
+    } else {
+        Vec::new()
+    };
+
     let report = DietReport {
         orphaned_projects: analysis.orphaned_projects,
         orphaned_sessions: sessions,
+        stale_projects,
+        cache_dirs,
         active_project_count: analysis.active_count,
         config_file_size: analysis.config_file_size,
         session_dir_total_size,
@@ -1458,6 +1550,8 @@ mod tests {
         DietReport {
             orphaned_projects,
             orphaned_sessions: sessions,
+            stale_projects: Vec::new(),
+            cache_dirs: Vec::new(),
             active_project_count: active_count,
             config_file_size: 50_000,
             session_dir_total_size: session_total + 100_000, // sessions + active
@@ -2740,5 +2834,161 @@ mod tests {
             "expected expanded path, got: {}",
             result[0].1.display()
         );
+    }
+
+    // ── stale/cache report tests ──────────────────────────────
+
+    /// Helper: create a DietReport with stale projects and/or cache dirs.
+    fn make_report_full(
+        orphan_paths: &[(&str, u64)],
+        sessions: Vec<OrphanedSession>,
+        stale: Vec<StaleProject>,
+        caches: Vec<CacheDir>,
+        active_count: usize,
+    ) -> DietReport {
+        let orphaned_projects = orphan_paths
+            .iter()
+            .map(|(p, s)| OrphanedProject {
+                path: p.to_string(),
+                entry_size: *s,
+            })
+            .collect();
+        let session_total: u64 = sessions.iter().map(|s| s.total_size).sum();
+        DietReport {
+            orphaned_projects,
+            orphaned_sessions: sessions,
+            stale_projects: stale,
+            cache_dirs: caches,
+            active_project_count: active_count,
+            config_file_size: 50_000,
+            session_dir_total_size: session_total + 100_000,
+            claude_home: PathBuf::from("/fakehome/.claude"),
+        }
+    }
+
+    #[test]
+    fn test_report_with_stale_projects() {
+        let stale = vec![
+            StaleProject {
+                path: "/fakehome/work/old-client".to_string(),
+                last_activity_secs: 120 * 86400, // 120 days
+                history_size: 340_000,
+                session_size: 10_000,
+            },
+            StaleProject {
+                path: "/fakehome/tmp/experiment".to_string(),
+                last_activity_secs: 91 * 86400, // 91 days
+                history_size: 580_000,
+                session_size: 5_000,
+            },
+        ];
+        let report = make_report_full(&[], vec![], stale, vec![], 3);
+        let output = build_report_string(&report, false);
+
+        assert!(output.contains("stale projects (2):"));
+        assert!(output.contains("120 days ago"));
+        assert!(output.contains("91 days ago"));
+        assert!(output.contains("/fakehome/work/old-client"));
+        assert!(output.contains("/fakehome/tmp/experiment"));
+        assert!(output.contains("(history clearable)"));
+    }
+
+    #[test]
+    fn test_report_with_cache_dirs() {
+        let caches = vec![
+            CacheDir {
+                name: "statsig".to_string(),
+                path: PathBuf::from("/fakehome/.claude/statsig"),
+                size: 12_582_912, // ~12 MB
+            },
+            CacheDir {
+                name: "file-history".to_string(),
+                path: PathBuf::from("/fakehome/.claude/file-history"),
+                size: 33_554_432, // ~32 MB
+            },
+        ];
+        let report = make_report_full(&[], vec![], vec![], caches, 3);
+        let output = build_report_string(&report, false);
+
+        assert!(output.contains("clearable cache dirs (2):"));
+        assert!(output.contains("statsig/"));
+        assert!(output.contains("file-history/"));
+        assert!(output.contains("(removable)"));
+    }
+
+    #[test]
+    fn test_report_stale_and_cache() {
+        let stale = vec![StaleProject {
+            path: "/fakehome/old".to_string(),
+            last_activity_secs: 100 * 86400,
+            history_size: 1000,
+            session_size: 500,
+        }];
+        let caches = vec![CacheDir {
+            name: "statsig".to_string(),
+            path: PathBuf::from("/fakehome/.claude/statsig"),
+            size: 2000,
+        }];
+        let report = make_report_full(&[], vec![], stale, caches, 1);
+        let output = build_report_string(&report, false);
+
+        // Both sections present
+        assert!(output.contains("stale projects (1):"));
+        assert!(output.contains("clearable cache dirs (1):"));
+    }
+
+    #[test]
+    fn test_report_total_reclaimable_all() {
+        let stale = vec![StaleProject {
+            path: "/fakehome/stale".to_string(),
+            last_activity_secs: 200 * 86400,
+            history_size: 1000,
+            session_size: 2000,
+        }];
+        let caches = vec![CacheDir {
+            name: "statsig".to_string(),
+            path: PathBuf::from("/fakehome/.claude/statsig"),
+            size: 3000,
+        }];
+        let sessions = vec![OrphanedSession {
+            folder_path: PathBuf::from("/fakehome/.claude/projects/-x"),
+            total_size: 4000,
+        }];
+        // orphan_entry_size=500, session=4000, stale_history=1000, stale_session=2000, cache=3000
+        // total = 500 + 4000 + 1000 + 2000 + 3000 = 10500
+        let report = make_report_full(
+            &[("/fakehome/x", 500)],
+            sessions,
+            stale,
+            caches,
+            1,
+        );
+        let output = build_report_string(&report, false);
+
+        assert!(output.contains("Total reclaimable: 10.3 KB"));
+    }
+
+    #[test]
+    fn test_report_nothing_to_clean_all_empty() {
+        let report = make_report_full(&[], vec![], vec![], vec![], 5);
+        let output = build_report_string(&report, false);
+
+        assert!(output.contains("No orphaned projects found. Nothing to clean up."));
+        assert!(!output.contains("├─"));
+        assert!(!output.contains("Total reclaimable"));
+    }
+
+    #[test]
+    fn test_report_days_ago_format() {
+        let stale = vec![StaleProject {
+            path: "/fakehome/old-proj".to_string(),
+            last_activity_secs: 45 * 86400, // 45 days
+            history_size: 100,
+            session_size: 200,
+        }];
+        let report = make_report_full(&[], vec![], stale, vec![], 1);
+        let output = build_report_string(&report, false);
+
+        assert!(output.contains("45 days ago"));
     }
 }
