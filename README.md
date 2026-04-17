@@ -57,8 +57,8 @@ supports the same pass-through semantics.
 ```bash
 cyolo profile add personal ~/.claude             # register the existing ~/.claude as a profile (no symlinks — it is the source)
 cyolo profile default personal                   # make it the fallback when no .claude-profile.json is found
-cyolo profile add work                           # creates ~/.claude-work/ + symlinks shared config
-cyolo profile list                               # shows "* personal" and "  work"
+cyolo profile add work                           # creates ~/.claude-work/ + symlinks shared config + launches `claude` so you can /login as the work account
+cyolo profile list                               # shows "* personal  skyfe79@gmail.com" and "  work  work@example.com"
 cyolo                                            # runs `claude --dangerously-skip-permissions` with the resolved profile
 ```
 
@@ -70,14 +70,49 @@ cd ~/work/client-a && cyolo profile init work
 cyolo                                            # resolves "work" via walk-up from anywhere beneath ~/work/client-a
 ```
 
+## How multi-account OAuth actually works
+
+Claude Code stores its OAuth token in the macOS Keychain. The service name
+is composed dynamically from `CLAUDE_CONFIG_DIR`:
+
+```
+CLAUDE_CONFIG_DIR unset        → Claude Code-credentials
+CLAUDE_CONFIG_DIR=~/.claude-work → Claude Code-credentials-<sha256("/Users/you/.claude-work")[:8]>
+```
+
+Because each profile directory hashes to a different suffix, **each profile
+gets its own distinct Keychain entry**. Two Anthropic accounts can coexist —
+no re-login when you switch profiles, no overwritten tokens. cyolo simply
+sets `CLAUDE_CONFIG_DIR` before launching `claude` and lets Claude Code
+itself pick the right Keychain entry.
+
+The account identity (email, organization, subscription tier) is stored in
+`<CLAUDE_CONFIG_DIR>/.claude.json` under `oauthAccount`. `cyolo profile list`
+and `cyolo profile whoami` read this file to show you which account a profile
+is currently bound to.
+
+### Two-account tutorial
+
+```bash
+cyolo profile add personal ~/.claude         # register existing login as "personal" (no extra login needed)
+cyolo profile default personal
+cyolo profile add work                       # creates ~/.claude-work/, auto-opens `claude` → run /login with your second Anthropic account
+cyolo profile list                           # both profiles listed with their emails
+cd ~/work/project && cyolo profile init work # bind this tree to the work profile
+cyolo                                        # from inside ~/work/... → work account; elsewhere → personal
+```
+
+If you skip the auto-login (`--no-login` on `cyolo profile add`), you can
+always run `cyolo profile login <name>` later.
+
 ## Usage — profile subcommands
 
-Seven subcommands cover the full profile lifecycle.
+Nine subcommands cover the full profile lifecycle.
 
 ### add
 
 ```bash
-cyolo profile add <name> [config-dir] [--no-share]
+cyolo profile add <name> [config-dir] [--no-share] [--no-login]
 ```
 
 Register a new profile. `config-dir` defaults to `~/.claude-<name>`.
@@ -87,9 +122,37 @@ symlinked from `~/.claude/` unless `--no-share` is given. Registering
 new profile as the default, run `cyolo profile default <name>`
 afterward.
 
+Immediately after registration, `cyolo` launches `claude` with the new
+`CLAUDE_CONFIG_DIR` so you can run `/login` and bind the intended Anthropic
+account to this profile's Keychain entry. Pass `--no-login` to skip the
+launch (useful when you are re-registering a profile that already has a
+valid token, or when running in CI).
+
 ```bash
 cyolo profile add client ~/.claude-client-a
+cyolo profile add scratch --no-login          # register without spawning claude
 ```
+
+### login
+
+```bash
+cyolo profile login <name>
+```
+
+Re-run the interactive login flow for a registered profile. Useful when
+a refresh token expires or when you want to swap the profile to a
+different Anthropic account. Equivalent to the launch that `add` does by
+default.
+
+### whoami
+
+```bash
+cyolo profile whoami
+```
+
+Like `current`, but also prints the `oauthAccount.emailAddress` extracted
+from the resolved profile's `.claude.json`. If the profile has never been
+logged in, the email line reads `(needs login — run cyolo profile login <name>)`.
 
 ### rm
 
