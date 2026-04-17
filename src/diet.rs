@@ -64,6 +64,17 @@ pub(crate) struct StaleProject {
     pub session_size: u64,
 }
 
+/// A cache directory inside `~/.claude/` whose contents can be safely removed.
+#[derive(Debug)]
+pub(crate) struct CacheDir {
+    /// Human-readable name of the cache directory (e.g. "statsig").
+    pub name: String,
+    /// Full path to the cache directory.
+    pub path: PathBuf,
+    /// Total size of all files within the directory in bytes.
+    pub size: u64,
+}
+
 /// Aggregated analysis results for the diet command.
 #[derive(Debug)]
 pub(crate) struct DietReport {
@@ -400,6 +411,118 @@ pub(crate) fn detect_stale_projects(
     }
 
     stale
+}
+
+/// Measure cache directories inside `claude_home` that can be safely cleaned.
+///
+/// Checks three known cache directories: `statsig/`, `shell-snapshots/`, and
+/// `file-history/`. Returns entries only for directories that exist on disk.
+pub(crate) fn measure_cache_dirs(claude_home: &Path) -> Vec<CacheDir> {
+    const CACHE_NAMES: &[&str] = &["statsig", "shell-snapshots", "file-history"];
+
+    let mut result = Vec::new();
+    for &name in CACHE_NAMES {
+        let path = claude_home.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_dir() => {
+                let size = dir_size(&path);
+                result.push(CacheDir {
+                    name: name.to_string(),
+                    path,
+                    size,
+                });
+            }
+            _ => {}
+        }
+    }
+    result
+}
+
+/// Remove all contents within each cache directory, preserving the directories themselves.
+///
+/// For each `CacheDir`: iterates `fs::read_dir` entries, uses `fs::remove_dir_all`
+/// for subdirectories and `fs::remove_file` for files. Individual removal failures
+/// warn to stderr but don't abort.
+/// Returns `(removed_count, bytes_freed)` where `removed_count` is the number of
+/// cache directories that were processed and `bytes_freed` is the sum of their sizes.
+pub(crate) fn remove_cache_contents(
+    cache_dirs: &[CacheDir],
+) -> Result<(usize, u64), CyoloError> {
+    let mut removed_count: usize = 0;
+    let mut bytes_freed: u64 = 0;
+
+    for cache in cache_dirs {
+        // Re-check that the cache path is still a real directory (not a symlink)
+        // to guard against a TOCTOU race where the dir was replaced between
+        // measure_cache_dirs() and this call.
+        match fs::symlink_metadata(&cache.path) {
+            Ok(meta) if meta.is_dir() => {}
+            _ => {
+                eprintln!(
+                    "warning: cache directory {} is no longer a real directory, skipping",
+                    cache.path.display()
+                );
+                continue;
+            }
+        }
+
+        let entries = match fs::read_dir(&cache.path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!(
+                    "warning: could not read cache directory {}: {}",
+                    cache.path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not read entry in {}: {}",
+                        cache.path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            let entry_path = entry.path();
+            let entry_meta = match fs::symlink_metadata(&entry_path) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not stat {}: {}",
+                        entry_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let result = if entry_meta.is_dir() {
+                fs::remove_dir_all(&entry_path)
+            } else {
+                fs::remove_file(&entry_path)
+            };
+
+            if let Err(e) = result {
+                eprintln!(
+                    "warning: failed to remove {}: {}",
+                    entry_path.display(),
+                    e
+                );
+            }
+        }
+
+        removed_count += 1;
+        bytes_freed += cache.size;
+    }
+
+    Ok((removed_count, bytes_freed))
 }
 
 /// Replace the user's home directory prefix with `~` for shorter display paths.
@@ -2180,5 +2303,226 @@ mod tests {
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].history_size, 0, "non-array history should yield history_size=0");
+    }
+
+    // ── measure_cache_dirs tests ──────────────────────────────
+
+    #[test]
+    fn test_measure_cache_all_exist() {
+        let dir = TempDir::new().unwrap();
+        let claude_home = dir.path();
+
+        // Create all three cache directories with files
+        fs::create_dir(claude_home.join("statsig")).unwrap();
+        fs::write(claude_home.join("statsig").join("data.json"), "statsig data").unwrap(); // 12 bytes
+
+        fs::create_dir(claude_home.join("shell-snapshots")).unwrap();
+        fs::write(claude_home.join("shell-snapshots").join("snap.bin"), "snapshot").unwrap(); // 8 bytes
+
+        fs::create_dir(claude_home.join("file-history")).unwrap();
+        fs::write(claude_home.join("file-history").join("history.log"), "hist").unwrap(); // 4 bytes
+
+        let result = measure_cache_dirs(claude_home);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "statsig");
+        assert_eq!(result[0].size, 12);
+        assert_eq!(result[1].name, "shell-snapshots");
+        assert_eq!(result[1].size, 8);
+        assert_eq!(result[2].name, "file-history");
+        assert_eq!(result[2].size, 4);
+    }
+
+    #[test]
+    fn test_measure_cache_partial() {
+        let dir = TempDir::new().unwrap();
+        let claude_home = dir.path();
+
+        // Only create statsig
+        fs::create_dir(claude_home.join("statsig")).unwrap();
+        fs::write(claude_home.join("statsig").join("data.json"), "abc").unwrap(); // 3 bytes
+
+        let result = measure_cache_dirs(claude_home);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "statsig");
+        assert_eq!(result[0].size, 3);
+    }
+
+    #[test]
+    fn test_measure_cache_none_exist() {
+        let dir = TempDir::new().unwrap();
+        let result = measure_cache_dirs(dir.path());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_measure_cache_sizes_match_dir_size() {
+        let dir = TempDir::new().unwrap();
+        let claude_home = dir.path();
+
+        fs::create_dir(claude_home.join("statsig")).unwrap();
+        fs::write(claude_home.join("statsig").join("a.bin"), vec![0u8; 100]).unwrap();
+        fs::create_dir(claude_home.join("statsig").join("sub")).unwrap();
+        fs::write(
+            claude_home.join("statsig").join("sub").join("b.bin"),
+            vec![0u8; 50],
+        )
+        .unwrap();
+
+        let result = measure_cache_dirs(claude_home);
+
+        assert_eq!(result.len(), 1);
+        let expected_size = dir_size(&claude_home.join("statsig"));
+        assert_eq!(result[0].size, expected_size);
+        assert_eq!(result[0].size, 150);
+    }
+
+    #[test]
+    fn test_measure_cache_ignores_symlink_as_dir() {
+        let dir = TempDir::new().unwrap();
+        let claude_home = dir.path();
+        let target_dir = TempDir::new().unwrap();
+
+        // Create a symlink named "statsig" → should be skipped
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target_dir.path(), claude_home.join("statsig")).unwrap();
+        }
+
+        let result = measure_cache_dirs(claude_home);
+
+        assert!(result.is_empty(), "symlinked cache dir should be skipped");
+    }
+
+    #[test]
+    fn test_measure_cache_ignores_file_as_dir() {
+        let dir = TempDir::new().unwrap();
+        let claude_home = dir.path();
+
+        // Create a regular file named "statsig" instead of a directory
+        fs::write(claude_home.join("statsig"), "not a dir").unwrap();
+
+        let result = measure_cache_dirs(claude_home);
+
+        assert!(result.is_empty(), "regular file with cache name should be skipped");
+    }
+
+    // ── remove_cache_contents tests ───────────────────────────
+
+    #[test]
+    fn test_remove_cache_contents_basic() {
+        let dir = TempDir::new().unwrap();
+        let cache_path = dir.path().join("statsig");
+        fs::create_dir(&cache_path).unwrap();
+        fs::write(cache_path.join("file1.json"), "data1").unwrap();
+        fs::write(cache_path.join("file2.json"), "data2").unwrap();
+
+        let caches = vec![CacheDir {
+            name: "statsig".to_string(),
+            path: cache_path.clone(),
+            size: 10,
+        }];
+
+        let (removed, freed) = remove_cache_contents(&caches).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 10);
+        // Cache directory itself should still exist
+        assert!(cache_path.exists());
+        // But should be empty
+        let entries: Vec<_> = fs::read_dir(&cache_path).unwrap().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_remove_cache_contents_empty() {
+        let dir = TempDir::new().unwrap();
+        let cache_path = dir.path().join("empty-cache");
+        fs::create_dir(&cache_path).unwrap();
+
+        let caches = vec![CacheDir {
+            name: "empty-cache".to_string(),
+            path: cache_path.clone(),
+            size: 0,
+        }];
+
+        let (removed, freed) = remove_cache_contents(&caches).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 0);
+        assert!(cache_path.exists());
+    }
+
+    #[test]
+    fn test_remove_cache_contents_with_subdirs() {
+        let dir = TempDir::new().unwrap();
+        let cache_path = dir.path().join("file-history");
+        fs::create_dir(&cache_path).unwrap();
+        fs::write(cache_path.join("top.txt"), "top").unwrap();
+        fs::create_dir(cache_path.join("nested")).unwrap();
+        fs::write(cache_path.join("nested").join("deep.txt"), "deep").unwrap();
+        fs::create_dir(cache_path.join("nested").join("deeper")).unwrap();
+        fs::write(
+            cache_path.join("nested").join("deeper").join("file.bin"),
+            "bin",
+        )
+        .unwrap();
+
+        let caches = vec![CacheDir {
+            name: "file-history".to_string(),
+            path: cache_path.clone(),
+            size: 10,
+        }];
+
+        let (removed, freed) = remove_cache_contents(&caches).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 10);
+        assert!(cache_path.exists());
+        let entries: Vec<_> = fs::read_dir(&cache_path).unwrap().collect();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_remove_cache_contents_no_caches() {
+        let (removed, freed) = remove_cache_contents(&[]).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(freed, 0);
+    }
+
+    #[test]
+    fn test_remove_cache_contents_multiple() {
+        let dir = TempDir::new().unwrap();
+
+        let c1_path = dir.path().join("c1");
+        fs::create_dir(&c1_path).unwrap();
+        fs::write(c1_path.join("f1.txt"), "aaa").unwrap();
+
+        let c2_path = dir.path().join("c2");
+        fs::create_dir(&c2_path).unwrap();
+        fs::write(c2_path.join("f2.txt"), "bb").unwrap();
+
+        let caches = vec![
+            CacheDir {
+                name: "c1".to_string(),
+                path: c1_path.clone(),
+                size: 3,
+            },
+            CacheDir {
+                name: "c2".to_string(),
+                path: c2_path.clone(),
+                size: 2,
+            },
+        ];
+
+        let (removed, freed) = remove_cache_contents(&caches).unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(freed, 5);
+        assert!(c1_path.exists());
+        assert!(c2_path.exists());
+        assert!(fs::read_dir(&c1_path).unwrap().count() == 0);
+        assert!(fs::read_dir(&c2_path).unwrap().count() == 0);
     }
 }
