@@ -77,6 +77,31 @@ cd ~/work/client-a && cyolo profile init work
 cyolo                                            # resolves "work" via walk-up from anywhere beneath ~/work/client-a
 ```
 
+## Command structure
+
+cyolo only owns three top-level verbs. Everything else is forwarded verbatim
+to `claude --dangerously-skip-permissions` with the resolved profile's
+`CLAUDE_CONFIG_DIR`:
+
+| Input | cyolo behavior |
+|---|---|
+| `cyolo help` · `cyolo --help` · `cyolo -h` | Prints cyolo's own help |
+| `cyolo profile ...` | Handled in-process (9 subcommands — see below) |
+| `cyolo diet ...` | Handled in-process (see Usage — diet) |
+| `cyolo <anything else>` | `claude --dangerously-skip-permissions <args>` |
+
+The rule is unambiguous: if the first argument is `help`, `--help`, `-h`,
+`profile`, or `diet`, cyolo handles it. Everything else — including
+`--version`, `-p "..."`, `-c`, plain prompts, or unknown verbs — is
+transparent to claude.
+
+A consequence: `cyolo --version` prints **Claude Code's** version, not
+cyolo's. To see cyolo's own version, run `cyolo help` (the first line
+shows `cyolo <VERSION>`).
+
+**`cyolo update` was removed** — run `claude update` directly instead.
+Upgrading Claude Code is not part of cyolo's scope.
+
 ## How multi-account OAuth actually works
 
 Claude Code stores its OAuth token in the macOS Keychain. The service name
