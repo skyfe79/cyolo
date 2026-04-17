@@ -6,7 +6,7 @@ use crate::symlink;
 
 /// Route profile subcommands.
 ///
-/// Usage: `cyolo profile <add|rm|list>`
+/// Usage: `cyolo profile <add|rm|list|link|current|init|default>`
 pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     match args.first().map(|s| s.as_str()) {
         Some("add") => add(&args[1..]),
@@ -14,8 +14,10 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("list") | Some("ls") => list(),
         Some("link") => link(&args[1..]),
         Some("current") => current(&args[1..]),
+        Some("init") => profile_init(&args[1..]),
+        Some("default") => profile_default(&args[1..]),
         None => {
-            println!("Usage: cyolo profile <add|rm|list|link|current>");
+            println!("Usage: cyolo profile <add|rm|list|link|current|init|default>");
             println!();
             println!("Commands:");
             println!("  add <name> [config-dir] [--no-share]  Register a new profile");
@@ -23,11 +25,13 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             println!("  list                     List all profiles");
             println!("  link <name>              Re-create shared symlinks for a profile");
             println!("  current                  Show the currently active profile");
+            println!("  init [name]              Create .claude-profile.json in current directory");
+            println!("  default [name|--unset]   Get/set/clear the default profile");
             Ok(())
         }
         Some(cmd) => {
             eprintln!("cyolo: unknown profile command '{cmd}'");
-            eprintln!("Available: add, rm, list, link, current");
+            eprintln!("Available: add, rm, list, link, current, init, default");
             Err(CyoloError::NonZeroExit(1))
         }
     }
