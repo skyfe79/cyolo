@@ -13,19 +13,21 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("rm") | Some("remove") => rm(&args[1..]),
         Some("list") | Some("ls") => list(),
         Some("link") => link(&args[1..]),
+        Some("current") => current(&args[1..]),
         None => {
-            println!("Usage: cyolo profile <add|rm|list|link>");
+            println!("Usage: cyolo profile <add|rm|list|link|current>");
             println!();
             println!("Commands:");
             println!("  add <name> [config-dir] [--no-share]  Register a new profile");
             println!("  rm <name>                Remove a profile");
             println!("  list                     List all profiles");
             println!("  link <name>              Re-create shared symlinks for a profile");
+            println!("  current                  Show the currently active profile");
             Ok(())
         }
         Some(cmd) => {
             eprintln!("cyolo: unknown profile command '{cmd}'");
-            eprintln!("Available: add, rm, list, link");
+            eprintln!("Available: add, rm, list, link, current");
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -221,6 +223,33 @@ pub fn link(args: &[String]) -> Result<(), CyoloError> {
     Ok(())
 }
 
+/// Show the currently active profile.
+///
+/// Runs `detect::resolve_profile()` and prints the result.
+/// Does NOT launch claude.
+///
+/// Usage: `cyolo profile current`
+pub fn current(args: &[String]) -> Result<(), CyoloError> {
+    if !args.is_empty() {
+        eprintln!("Usage: cyolo profile current");
+        return Err(CyoloError::NonZeroExit(1));
+    }
+    let resolved = crate::detect::resolve_profile()?;
+    match resolved {
+        Some(profile) => {
+            if let Some(name) = &profile.name {
+                println!("profile: {name}");
+            }
+            println!("config_dir: {}", profile.config_dir.display());
+            println!("source: {}", profile.source);
+        }
+        None => {
+            println!("No profile detected. Using default Claude configuration (~/.claude).");
+        }
+    }
+    Ok(())
+}
+
 /// Expand leading `~` or `~/` to the user's home directory.
 pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
@@ -246,6 +275,12 @@ mod tests {
     #[test]
     fn test_dispatch_unknown_subcommand_returns_error() {
         let result = dispatch(&args(&["unknown"]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_current_rejects_extra_args() {
+        let result = current(&args(&["unexpected"]));
         assert!(result.is_err());
     }
 }
