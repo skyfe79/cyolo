@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::config::CyoloConfig;
 use crate::error::CyoloError;
+use crate::profile::expand_tilde;
 
 /// The `.claude-profile.json` file schema.
 ///
@@ -92,6 +94,98 @@ pub fn find_profile_file() -> Result<Option<(PathBuf, ProfileFile)>, CyoloError>
         }
     };
     find_profile_file_from(&cwd)
+}
+
+/// A resolved profile ready for use by the runner.
+#[derive(Debug)]
+pub struct ResolvedProfile {
+    /// Profile name, if resolved via a named profile.
+    pub name: Option<String>,
+    /// Absolute path to the profile's config directory.
+    pub config_dir: PathBuf,
+    /// Where this resolution came from: the walk-up file path or `"default"`.
+    pub source: String,
+}
+
+/// Resolve a profile from a walk-up result and config, without disk I/O.
+///
+/// This is the pure-logic core, separated for testability.
+fn resolve_with(
+    config: &CyoloConfig,
+    found: Option<(PathBuf, ProfileFile)>,
+) -> Result<Option<ResolvedProfile>, CyoloError> {
+    if let Some((path, pf)) = found {
+        let source = path.display().to_string();
+
+        // name variant takes priority
+        if let Some(ref name) = pf.name {
+            let profile = config
+                .profiles
+                .get(name)
+                .ok_or_else(|| CyoloError::ProfileNotFound { name: name.clone() })?;
+            return Ok(Some(ResolvedProfile {
+                name: Some(name.clone()),
+                config_dir: profile.config_dir.clone(),
+                source,
+            }));
+        }
+
+        // config_dir variant
+        if let Some(ref dir) = pf.config_dir {
+            return Ok(Some(ResolvedProfile {
+                name: None,
+                config_dir: expand_tilde(dir),
+                source,
+            }));
+        }
+    }
+
+    // No walk-up file — check default
+    if let Some(ref default_name) = config.default {
+        let profile = config
+            .profiles
+            .get(default_name)
+            .ok_or_else(|| CyoloError::ProfileNotFound {
+                name: default_name.clone(),
+            })?;
+        return Ok(Some(ResolvedProfile {
+            name: Some(default_name.clone()),
+            config_dir: profile.config_dir.clone(),
+            source: "default".into(),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Resolve the active profile using the full priority chain.
+///
+/// 1. Walk up from cwd looking for `.claude-profile.json`
+/// 2. Fall back to the default profile in `~/.cyolo/config.json`
+/// 3. Return `None` if neither is available
+///
+/// The global config (`~/.cyolo/config.json`) is loaded lazily — only when
+/// a named profile lookup or default fallback is needed. A walk-up file
+/// with a direct `config_dir` never touches the global config.
+pub fn resolve_profile() -> Result<Option<ResolvedProfile>, CyoloError> {
+    let found = find_profile_file()?;
+
+    // config_dir-only walk-up doesn't need the global config
+    if let Some((ref path, ref pf)) = found {
+        if pf.name.is_none() {
+            if let Some(ref dir) = pf.config_dir {
+                return Ok(Some(ResolvedProfile {
+                    name: None,
+                    config_dir: expand_tilde(dir),
+                    source: path.display().to_string(),
+                }));
+            }
+        }
+    }
+
+    // Name lookup or default fallback — needs config
+    let config = CyoloConfig::load()?;
+    resolve_with(&config, found)
 }
 
 #[cfg(test)]
@@ -190,5 +284,111 @@ mod tests {
         let err = parse(json, Path::new("test.json")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("expected 'name' or 'config_dir' field"), "got: {msg}");
+    }
+
+    // --- resolve_with tests (pure logic, no disk I/O) ---
+
+    use crate::config::{CyoloConfig, Profile};
+    use std::collections::BTreeMap;
+
+    fn make_config(profiles: &[(&str, &str)], default: Option<&str>) -> CyoloConfig {
+        let mut map = BTreeMap::new();
+        for (name, dir) in profiles {
+            map.insert(
+                name.to_string(),
+                Profile {
+                    name: name.to_string(),
+                    config_dir: PathBuf::from(dir),
+                },
+            );
+        }
+        CyoloConfig {
+            default: default.map(|s| s.to_string()),
+            profiles: map,
+        }
+    }
+
+    #[test]
+    fn test_resolve_with_name() {
+        let config = make_config(&[("work", "/home/user/.claude-work")], None);
+        let pf = ProfileFile {
+            name: Some("work".into()),
+            config_dir: None,
+        };
+        let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
+
+        let result = resolve_with(&config, found).unwrap().unwrap();
+        assert_eq!(result.name.as_deref(), Some("work"));
+        assert_eq!(result.config_dir, PathBuf::from("/home/user/.claude-work"));
+        assert_eq!(result.source, "/project/.claude-profile.json");
+    }
+
+    #[test]
+    fn test_resolve_with_unregistered_name() {
+        let config = make_config(&[], None);
+        let pf = ProfileFile {
+            name: Some("unknown".into()),
+            config_dir: None,
+        };
+        let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
+
+        let err = resolve_with(&config, found).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_resolve_with_config_dir() {
+        let config = make_config(&[], None);
+        let pf = ProfileFile {
+            name: None,
+            config_dir: Some("/custom/dir".into()),
+        };
+        let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
+
+        let result = resolve_with(&config, found).unwrap().unwrap();
+        assert!(result.name.is_none());
+        assert_eq!(result.config_dir, PathBuf::from("/custom/dir"));
+        assert_eq!(result.source, "/project/.claude-profile.json");
+    }
+
+    #[test]
+    fn test_resolve_default_fallback() {
+        let config = make_config(&[("main", "/home/user/.claude-main")], Some("main"));
+        let result = resolve_with(&config, None).unwrap().unwrap();
+        assert_eq!(result.name.as_deref(), Some("main"));
+        assert_eq!(result.config_dir, PathBuf::from("/home/user/.claude-main"));
+        assert_eq!(result.source, "default");
+    }
+
+    #[test]
+    fn test_resolve_with_config_dir_tilde() {
+        let config = make_config(&[], None);
+        let pf = ProfileFile {
+            name: None,
+            config_dir: Some("~/my-claude-config".into()),
+        };
+        let found = Some((PathBuf::from("/project/.claude-profile.json"), pf));
+
+        let result = resolve_with(&config, found).unwrap().unwrap();
+        assert!(result.name.is_none());
+        // Tilde must be expanded to an absolute path
+        assert!(
+            !result.config_dir.starts_with("~"),
+            "tilde was not expanded: {:?}",
+            result.config_dir
+        );
+        assert!(
+            result.config_dir.ends_with("my-claude-config"),
+            "unexpected path: {:?}",
+            result.config_dir
+        );
+    }
+
+    #[test]
+    fn test_resolve_none() {
+        let config = make_config(&[], None);
+        let result = resolve_with(&config, None).unwrap();
+        assert!(result.is_none());
     }
 }

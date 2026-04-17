@@ -222,7 +222,7 @@ pub fn link(args: &[String]) -> Result<(), CyoloError> {
 }
 
 /// Expand leading `~` or `~/` to the user's home directory.
-fn expand_tilde(path: &str) -> PathBuf {
+pub(crate) fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
     } else if let Some(rest) = path.strip_prefix("~/") {
