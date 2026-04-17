@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::CyoloError;
 
@@ -227,16 +229,20 @@ pub(crate) fn scan_session_folders(
     }
 
     // Find session folders that correspond to orphaned project paths.
+    // Use symlink_metadata to avoid following a symlinked session folder root.
     let mut orphaned_sessions = Vec::new();
     for path in orphaned_paths {
         let session_name = project_path_to_session_dir(path);
         let session_path = projects_dir.join(&session_name);
-        if session_path.is_dir() {
-            let total_size = dir_size(&session_path);
-            orphaned_sessions.push(OrphanedSession {
-                folder_path: session_path,
-                total_size,
-            });
+        if let Ok(meta) = fs::symlink_metadata(&session_path) {
+            if meta.is_dir() {
+                let total_size = dir_size(&session_path);
+                orphaned_sessions.push(OrphanedSession {
+                    folder_path: session_path,
+                    total_size,
+                });
+            }
+            // If it's a symlink (not a real dir), skip — don't follow it.
         }
     }
 
@@ -380,6 +386,194 @@ pub(crate) fn build_report_string(report: &DietReport, applied: bool) -> String 
 /// Print the diet analysis report to stdout.
 pub(crate) fn print_report(report: &DietReport, applied: bool) {
     print!("{}", build_report_string(report, applied));
+}
+
+/// Format a Unix timestamp (seconds since epoch) as `YYYYMMDDHHMMSS`.
+///
+/// Uses Howard Hinnant's `civil_from_days` algorithm for correct leap-year handling
+/// without any external dependency (no chrono).
+pub(crate) fn format_timestamp(secs: u64) -> String {
+    let days = (secs / 86400) as i64 + 719_468; // shift epoch to 0000-03-01
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = (days - era * 146_097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // year of era
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month index [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let s = rem % 60;
+
+    format!("{:04}{:02}{:02}{:02}{:02}{:02}", y, m, d, h, min, s)
+}
+
+/// Create a timestamped backup of `~/.claude.json`.
+///
+/// Returns the path to the newly created backup file.
+pub(crate) fn backup_claude_json(claude_json_path: &Path) -> Result<PathBuf, CyoloError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = format_timestamp(now);
+
+    let file_name = format!(
+        "{}.backup-{ts}",
+        claude_json_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+    );
+    let backup_path = claude_json_path.with_file_name(file_name);
+
+    fs::copy(claude_json_path, &backup_path).map_err(|e| CyoloError::ConfigIoError {
+        context: format!(
+            "failed to back up {} to {}",
+            claude_json_path.display(),
+            backup_path.display()
+        ),
+        source: e,
+    })?;
+
+    Ok(backup_path)
+}
+
+/// Remove orphaned project entries from the parsed JSON and write back to disk.
+///
+/// Uses `serde_json::Map::retain` with a `HashSet` for O(1) lookup.
+/// The file is written with `serde_json::to_string_pretty` + `fs::write`
+/// (simple write — atomic write is deferred to v7).
+pub(crate) fn remove_orphaned_entries(
+    parsed_json: &mut serde_json::Value,
+    orphaned_paths: &[String],
+    claude_json_path: &Path,
+) -> Result<(), CyoloError> {
+    let orphaned_set: HashSet<&str> = orphaned_paths.iter().map(|s| s.as_str()).collect();
+
+    if let Some(projects) = parsed_json
+        .get_mut("projects")
+        .and_then(|v| v.as_object_mut())
+    {
+        projects.retain(|key, _| !orphaned_set.contains(key.as_str()));
+    }
+
+    let serialized =
+        serde_json::to_string_pretty(parsed_json).map_err(|e| CyoloError::ConfigIoError {
+            context: format!("failed to serialize JSON for {}", claude_json_path.display()),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })?;
+
+    fs::write(claude_json_path, serialized).map_err(|e| CyoloError::ConfigIoError {
+        context: format!("failed to write {}", claude_json_path.display()),
+        source: e,
+    })?;
+
+    Ok(())
+}
+
+/// Remove orphaned session folders with symlink safety.
+///
+/// For each folder: iterate top-level entries, unlink any symlinks with
+/// `fs::remove_file` (never follow), then `fs::remove_dir_all` for the folder.
+/// Returns `(removed_count, bytes_freed)`.
+pub(crate) fn remove_session_folders(
+    sessions: &[OrphanedSession],
+) -> Result<(usize, u64), CyoloError> {
+    let mut removed_count: usize = 0;
+    let mut bytes_freed: u64 = 0;
+
+    for session in sessions {
+        // Guard: if the session folder root itself is a symlink, just unlink it.
+        // Never read_dir or remove_dir_all through a symlinked root — that would
+        // mutate files outside ~/.claude/projects/.
+        let root_meta = fs::symlink_metadata(&session.folder_path).map_err(|e| {
+            CyoloError::ConfigIoError {
+                context: format!(
+                    "failed to stat session folder {}",
+                    session.folder_path.display()
+                ),
+                source: e,
+            }
+        })?;
+
+        if root_meta.file_type().is_symlink() {
+            fs::remove_file(&session.folder_path).map_err(|e| CyoloError::ConfigIoError {
+                context: format!(
+                    "failed to unlink symlinked session folder {}",
+                    session.folder_path.display()
+                ),
+                source: e,
+            })?;
+        } else {
+            // First pass: unlink any symlinks in the top-level directory entries.
+            if let Ok(entries) = fs::read_dir(&session.folder_path) {
+                for entry in entries.flatten() {
+                    if let Ok(meta) = fs::symlink_metadata(entry.path()) {
+                        if meta.file_type().is_symlink() {
+                            let _ = fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+
+            // Second pass: remove the entire folder (only regular files/dirs remain).
+            fs::remove_dir_all(&session.folder_path).map_err(|e| CyoloError::ConfigIoError {
+                context: format!(
+                    "failed to remove session folder {}",
+                    session.folder_path.display()
+                ),
+                source: e,
+            })?;
+        }
+
+        removed_count += 1;
+        bytes_freed += session.total_size;
+    }
+
+    Ok((removed_count, bytes_freed))
+}
+
+/// Execute the cleanup: backup, remove orphaned entries, remove session folders.
+///
+/// Prints a summary of actions taken.
+pub(crate) fn apply(
+    report: &DietReport,
+    parsed_json: &mut serde_json::Value,
+    claude_json_path: &Path,
+) -> Result<(), CyoloError> {
+    // Step 1: Backup
+    let backup_path = backup_claude_json(claude_json_path)?;
+    println!(
+        "Backed up to {}",
+        tilde_path(&backup_path.to_string_lossy())
+    );
+
+    // Step 2: Remove orphaned entries from JSON
+    let orphaned_paths: Vec<String> = report
+        .orphaned_projects
+        .iter()
+        .map(|o| o.path.clone())
+        .collect();
+    remove_orphaned_entries(parsed_json, &orphaned_paths, claude_json_path)?;
+    println!(
+        "Removed {} orphaned project entries",
+        report.orphaned_projects.len()
+    );
+
+    // Step 3: Remove orphaned session folders
+    let (removed_count, bytes_freed) = remove_session_folders(&report.orphaned_sessions)?;
+    println!(
+        "Removed {} orphaned session folders ({} freed)",
+        removed_count,
+        format_size(bytes_freed)
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -826,5 +1020,269 @@ mod tests {
         let output = build_report_string(&report, false);
         assert!(output.contains("orphaned session folders (1):"));
         assert!(output.contains("Total reclaimable:"));
+    }
+
+    // ── format_timestamp tests ─────────────────────────────────
+
+    #[test]
+    fn test_format_timestamp_epoch() {
+        // Unix epoch: 1970-01-01 00:00:00
+        assert_eq!(format_timestamp(0), "19700101000000");
+    }
+
+    #[test]
+    fn test_format_timestamp_known_date() {
+        // 1700000000 = 2023-11-14 22:13:20 UTC
+        assert_eq!(format_timestamp(1_700_000_000), "20231114221320");
+    }
+
+    #[test]
+    fn test_format_timestamp_leap_year() {
+        // 2024-02-29 12:00:00 UTC = 1709208000
+        assert_eq!(format_timestamp(1_709_208_000), "20240229120000");
+    }
+
+    #[test]
+    fn test_format_timestamp_year_2000() {
+        // 2000-01-01 00:00:00 UTC = 946684800
+        assert_eq!(format_timestamp(946_684_800), "20000101000000");
+    }
+
+    #[test]
+    fn test_format_timestamp_end_of_day() {
+        // 2026-04-17 23:59:59 UTC = 1776499199
+        // Let's use a known: 2025-12-31 23:59:59 UTC = 1767225599
+        assert_eq!(format_timestamp(1_767_225_599), "20251231235959");
+    }
+
+    // ── backup_claude_json tests ───────────────────────────────
+
+    #[test]
+    fn test_backup_creates_file() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("claude.json");
+        fs::write(&json_path, r#"{"projects": {}}"#).unwrap();
+
+        let backup_path = backup_claude_json(&json_path).unwrap();
+
+        assert!(backup_path.exists());
+        assert!(backup_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("claude.json.backup-"));
+        // Backup content matches original
+        let original = fs::read_to_string(&json_path).unwrap();
+        let backup = fs::read_to_string(&backup_path).unwrap();
+        assert_eq!(original, backup);
+    }
+
+    #[test]
+    fn test_backup_nonexistent_file_fails() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("nonexistent.json");
+
+        let result = backup_claude_json(&json_path);
+        assert!(result.is_err());
+    }
+
+    // ── remove_orphaned_entries tests ──────────────────────────
+
+    #[test]
+    fn test_remove_entries_preserves_other_fields() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("claude.json");
+        let content = r#"{
+  "version": "1.0",
+  "projects": {
+    "/active/project": {"name": "active"},
+    "/orphan/one": {"name": "orphan1"},
+    "/orphan/two": {"name": "orphan2"}
+  },
+  "settings": {"theme": "dark"}
+}"#;
+        fs::write(&json_path, content).unwrap();
+
+        let mut parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        let orphaned = vec!["/orphan/one".to_string(), "/orphan/two".to_string()];
+
+        remove_orphaned_entries(&mut parsed, &orphaned, &json_path).unwrap();
+
+        // Verify on-disk file
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&json_path).unwrap()).unwrap();
+        // Orphans removed
+        let projects = written["projects"].as_object().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert!(projects.contains_key("/active/project"));
+        assert!(!projects.contains_key("/orphan/one"));
+        assert!(!projects.contains_key("/orphan/two"));
+        // Other top-level fields preserved
+        assert_eq!(written["version"], "1.0");
+        assert_eq!(written["settings"]["theme"], "dark");
+    }
+
+    #[test]
+    fn test_remove_entries_no_projects_key() {
+        let dir = TempDir::new().unwrap();
+        let json_path = dir.path().join("claude.json");
+        let content = r#"{"version": "1.0"}"#;
+        fs::write(&json_path, content).unwrap();
+
+        let mut parsed: serde_json::Value = serde_json::from_str(content).unwrap();
+        let orphaned = vec!["/orphan/one".to_string()];
+
+        // Should succeed without error (no-op)
+        remove_orphaned_entries(&mut parsed, &orphaned, &json_path).unwrap();
+    }
+
+    // ── remove_session_folders tests ───────────────────────────
+
+    #[test]
+    fn test_remove_session_folders_regular() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("session1");
+        fs::create_dir(&session_dir).unwrap();
+        fs::write(session_dir.join("data.json"), "test data").unwrap(); // 9 bytes
+        fs::create_dir(session_dir.join("sub")).unwrap();
+        fs::write(session_dir.join("sub").join("nested.txt"), "nested").unwrap(); // 6 bytes
+
+        let sessions = vec![OrphanedSession {
+            folder_path: session_dir.clone(),
+            total_size: 15,
+        }];
+
+        let (removed, freed) = remove_session_folders(&sessions).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 15);
+        assert!(!session_dir.exists());
+    }
+
+    #[test]
+    fn test_remove_session_folders_with_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+
+        // Create a target file that should NOT be deleted
+        let target_file = target_dir.path().join("important.txt");
+        fs::write(&target_file, "important data").unwrap();
+
+        // Create session folder with a symlink and a regular file
+        let session_dir = dir.path().join("session-with-symlink");
+        fs::create_dir(&session_dir).unwrap();
+        fs::write(session_dir.join("regular.txt"), "regular").unwrap();
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target_file, session_dir.join("link.txt")).unwrap();
+        }
+
+        let sessions = vec![OrphanedSession {
+            folder_path: session_dir.clone(),
+            total_size: 100,
+        }];
+
+        let (removed, freed) = remove_session_folders(&sessions).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 100);
+        assert!(!session_dir.exists());
+        // Target file should still exist — symlink was unlinked, not followed
+        assert!(target_file.exists());
+        assert_eq!(fs::read_to_string(&target_file).unwrap(), "important data");
+    }
+
+    #[test]
+    fn test_remove_session_folders_empty_list() {
+        let (removed, freed) = remove_session_folders(&[]).unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(freed, 0);
+    }
+
+    #[test]
+    fn test_remove_session_folder_symlinked_root() {
+        // Regression: if the session folder itself is a symlink to an external
+        // directory, we must unlink the symlink — never read_dir or remove_dir_all
+        // through it, which would mutate data outside ~/.claude/projects/.
+        let dir = TempDir::new().unwrap();
+        let external_dir = TempDir::new().unwrap();
+
+        // Create files inside the external directory
+        let external_file = external_dir.path().join("precious.txt");
+        fs::write(&external_file, "do not delete").unwrap();
+
+        // Create a symlink session folder pointing to the external dir
+        let session_link = dir.path().join("session-symlink");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(external_dir.path(), &session_link).unwrap();
+        }
+
+        let sessions = vec![OrphanedSession {
+            folder_path: session_link.clone(),
+            total_size: 50,
+        }];
+
+        let (removed, freed) = remove_session_folders(&sessions).unwrap();
+
+        assert_eq!(removed, 1);
+        assert_eq!(freed, 50);
+        // The symlink itself should be gone
+        assert!(!session_link.exists());
+        // The external directory and its contents must be untouched
+        assert!(external_dir.path().exists());
+        assert!(external_file.exists());
+        assert_eq!(fs::read_to_string(&external_file).unwrap(), "do not delete");
+    }
+
+    #[test]
+    fn test_scan_skips_symlinked_session_root() {
+        // If a session folder entry is a symlink, scan_session_folders should skip it.
+        let dir = TempDir::new().unwrap();
+        let external_dir = TempDir::new().unwrap();
+        fs::write(external_dir.path().join("data.txt"), "external").unwrap();
+
+        let session_name = project_path_to_session_dir("/Users/codingmax/symlinked-proj");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(external_dir.path(), dir.path().join(&session_name))
+                .unwrap();
+        }
+
+        let orphaned_paths = vec!["/Users/codingmax/symlinked-proj".to_string()];
+        let (sessions, _total) = scan_session_folders(dir.path(), &orphaned_paths);
+
+        // The symlinked session folder should NOT be included
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_multiple_sessions() {
+        let dir = TempDir::new().unwrap();
+        let s1 = dir.path().join("s1");
+        let s2 = dir.path().join("s2");
+        fs::create_dir(&s1).unwrap();
+        fs::create_dir(&s2).unwrap();
+        fs::write(s1.join("a.txt"), "aaa").unwrap();
+        fs::write(s2.join("b.txt"), "bb").unwrap();
+
+        let sessions = vec![
+            OrphanedSession {
+                folder_path: s1.clone(),
+                total_size: 3,
+            },
+            OrphanedSession {
+                folder_path: s2.clone(),
+                total_size: 2,
+            },
+        ];
+
+        let (removed, freed) = remove_session_folders(&sessions).unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(freed, 5);
+        assert!(!s1.exists());
+        assert!(!s2.exists());
     }
 }
