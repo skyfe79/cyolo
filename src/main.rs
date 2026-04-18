@@ -1,13 +1,13 @@
 mod cli;
-mod commands;
 mod config;
 mod detect;
+mod diet;
 mod error;
 mod git;
 mod mcp;
+mod profile;
 mod runner;
 mod symlink;
-mod util;
 
 use error::CyoloError;
 use owo_colors::{set_override, OwoColorize};

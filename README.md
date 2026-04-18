@@ -85,11 +85,9 @@ to `claude --dangerously-skip-permissions` with the resolved profile's
 
 | Input | cyolo behavior |
 |---|---|
-| `cyolo help` · `cyolo --help` · `cyolo -h` | Prints cyolo's own help (handwritten) |
-| `cyolo profile ...` | Handled in-process via `clap` (10 subcommands — see below) |
-| `cyolo profile <sub> --help` | Per-subcommand help (e.g. `cyolo profile add --help`) |
-| `cyolo diet ...` | Handled in-process via `clap` (see Usage — diet) |
-| `cyolo diet --help` | Diet flag reference |
+| `cyolo help` · `cyolo --help` · `cyolo -h` | Prints cyolo's own help |
+| `cyolo profile ...` | Handled in-process (9 subcommands — see below) |
+| `cyolo diet ...` | Handled in-process (see Usage — diet) |
 | `cyolo <anything else>` | `claude --dangerously-skip-permissions <args>` |
 
 The rule is unambiguous: if the first argument is `help`, `--help`, `-h`,
