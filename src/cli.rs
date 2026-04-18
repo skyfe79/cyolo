@@ -1,10 +1,12 @@
 use owo_colors::OwoColorize;
 
+use crate::commands::diet;
+use crate::commands::profile;
+use crate::commands::profile::picker;
 use crate::detect;
-use crate::diet;
 use crate::error::CyoloError;
-use crate::profile;
 use crate::runner;
+use crate::util;
 
 /// Top-level command classification.
 ///
@@ -50,21 +52,21 @@ pub fn route() -> Result<(), CyoloError> {
             // (no args) on an interactive terminal and nothing resolved.
             // `cyolo -p "..."` or any pass-through invocation stays silent.
             let show_picker =
-                resolved.is_none() && args.is_empty() && profile::is_interactive();
+                resolved.is_none() && args.is_empty() && util::is_interactive();
             if show_picker {
-                match profile::interactive_init_menu() {
-                    Ok(profile::PickerOutcome::MarkerWritten) => {
+                match picker::interactive_init_menu() {
+                    Ok(picker::PickerOutcome::MarkerWritten) => {
                         // Re-resolve so the brand-new marker is honoured on
                         // this very same invocation — no second `cyolo` call.
                         resolved = detect::resolve_profile()?;
                     }
-                    Ok(profile::PickerOutcome::NewProfileRegistered) => {
+                    Ok(picker::PickerOutcome::NewProfileRegistered) => {
                         // `add` already ran `claude /login` interactively.
                         // Launching another claude session here would surprise
                         // the user with a back-to-back double launch — bail.
                         return Ok(());
                     }
-                    Ok(profile::PickerOutcome::Quit) => {
+                    Ok(picker::PickerOutcome::Quit) => {
                         // Explicit "do nothing" from the picker: exit cleanly
                         // without launching claude. The PRD §3.1 pass-through
                         // to `~/.claude` is still preserved for the non-picker

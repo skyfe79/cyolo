@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::config::CyoloConfig;
 use crate::error::CyoloError;
-use crate::profile::expand_tilde;
+use crate::util::expand_tilde;
 
 /// The `.claude-profile.json` file schema.
 ///
