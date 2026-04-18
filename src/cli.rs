@@ -65,8 +65,11 @@ pub fn route() -> Result<(), CyoloError> {
                         return Ok(());
                     }
                     Ok(profile::PickerOutcome::Quit) => {
-                        // Fall through: launch claude with no profile, matching
-                        // the original `cyolo()` zsh-function pass-through.
+                        // Explicit "do nothing" from the picker: exit cleanly
+                        // without launching claude. The PRD §3.1 pass-through
+                        // to `~/.claude` is still preserved for the non-picker
+                        // paths (non-TTY stdin, or `cyolo <args...>`).
+                        return Ok(());
                     }
                     Err(e) => return Err(e),
                 }
