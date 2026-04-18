@@ -160,6 +160,12 @@ account to this profile's Keychain entry. Pass `--no-login` to skip the
 launch (useful when you are re-registering a profile that already has a
 valid token, or when running in CI).
 
+Once the login session (or `--no-login`) completes, `add` also seeds
+`<config_dir>/.claude.json` with the `mcpServers` object from
+`~/.claude.json` — see [`sync-mcp`](#sync-mcp) for details. The first
+time you see `↳ synced N User MCP server(s)` in the output, that is
+this step running.
+
 ```bash
 cyolo profile add client ~/.claude-client-a
 cyolo profile add scratch --no-login          # register without spawning claude
@@ -305,6 +311,10 @@ Details:
   at resolution time, so the marker stays portable across machines. Useful
   when you want this tree to follow Claude Code's default account regardless
   of any `default` profile you set later via `cyolo profile default`.
+  Picking `d` also runs [`sync-mcp`](#sync-mcp) against `~/.claude/.claude.json`
+  so the first launch from that marker already carries your User MCPs
+  (Claude Code reads `<CLAUDE_CONFIG_DIR>/.claude.json`, not the env-unset
+  `~/.claude.json`, so without this sync the MCP list would look empty).
 - **Quit** (`q`): exits cyolo cleanly without writing a marker and without
   launching claude. The original pass-through to `~/.claude` (unset
   `CLAUDE_CONFIG_DIR`) is still in effect for the non-picker paths —
@@ -337,6 +347,33 @@ cyolo profile link <name>
 Idempotently (re)create the six shared symlinks for an already-registered
 profile. Use this after adding a new shared item in `~/.claude/` or if a
 symlink is broken.
+
+### sync-mcp
+
+```bash
+cyolo profile sync-mcp <name>     # sync a single profile
+cyolo profile sync-mcp --all      # sync every registered profile + ~/.claude
+```
+
+Copy the `mcpServers` object out of `~/.claude.json` (Claude Code's
+user-level config when `CLAUDE_CONFIG_DIR` is unset) into
+`<config_dir>/.claude.json` for the target profile. The write is atomic
+(temp + rename, `0o600`) and preserves every other key in the target
+(`oauthAccount`, `projects`, analytics caches, etc.) — only `mcpServers`
+is touched.
+
+Why this exists: Claude Code looks for `mcpServers` inside whatever
+directory `CLAUDE_CONFIG_DIR` points at, which means a fresh profile
+shows an empty "User MCPs" section even though `~/.claude.json` has
+them all. cyolo seeds the target automatically during `profile add`
+and when the picker's `d) default` option is selected; use
+`sync-mcp` to refresh a profile **after** you install a new MCP in
+`~/.claude.json`, or to retro-sync profiles that predate this feature.
+
+`--all` also targets `~/.claude/.claude.json` (not just registered
+profiles) so that the picker's `d) default` flow — which sets
+`CLAUDE_CONFIG_DIR=~/.claude` — resolves to the same MCP list as the
+env-unset default.
 
 ## Usage — diet
 

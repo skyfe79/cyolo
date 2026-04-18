@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{self, CyoloConfig, Profile};
 use crate::error::CyoloError;
@@ -8,7 +8,7 @@ use owo_colors::OwoColorize;
 
 /// Route profile subcommands.
 ///
-/// Usage: `cyolo profile <add|rm|list|link|current|init|default>`
+/// Usage: `cyolo profile <add|rm|list|link|login|current|whoami|init|default|sync-mcp>`
 pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
     match args.first().map(|s| s.as_str()) {
         Some("add") => add(&args[1..]),
@@ -20,8 +20,9 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some("whoami") => whoami(&args[1..]),
         Some("init") => profile_init(&args[1..]),
         Some("default") => profile_default(&args[1..]),
+        Some("sync-mcp") => sync_mcp(&args[1..]),
         None => {
-            println!("{} cyolo profile <add|rm|list|link|login|current|whoami|init|default>", "Usage:".yellow().bold());
+            println!("{} cyolo profile <add|rm|list|link|login|current|whoami|init|default|sync-mcp>", "Usage:".yellow().bold());
             println!();
             println!("Commands:");
             println!("  add <name> [config-dir] [--no-share] [--no-login]");
@@ -34,11 +35,12 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
             println!("  whoami                   Show active profile + email from its .claude.json");
             println!("  init [name]              Create .claude-profile.json in current directory");
             println!("  default [name|--unset]   Get/set/clear the default profile");
+            println!("  sync-mcp [name|--all]    Copy `mcpServers` from ~/.claude.json into a profile");
             Ok(())
         }
         Some(cmd) => {
             eprintln!("{} unknown profile command '{}'", "error:".red().bold(), cmd.bold());
-            eprintln!("{}", "Available: add, rm, list, link, login, current, whoami, init, default".dimmed());
+            eprintln!("{}", "Available: add, rm, list, link, login, current, whoami, init, default, sync-mcp".dimmed());
             Err(CyoloError::NonZeroExit(1))
         }
     }
@@ -158,7 +160,36 @@ pub fn add(args: &[String]) -> Result<(), CyoloError> {
         runner::run_claude_login(&config_dir)?;
     }
 
+    // Seed user-level MCP servers from `~/.claude.json` into
+    // `<config_dir>/.claude.json`. Runs AFTER /login so claude has already
+    // populated oauthAccount, and cyolo layers `mcpServers` on top without
+    // touching other keys. Best-effort — a sync failure must not make the
+    // whole `add` fail.
+    report_mcp_sync(&config_dir);
+
     Ok(())
+}
+
+/// Call `mcp::sync_mcp_to_profile` and print a compact status line.
+///
+/// Kept as a free function so both `add` and the picker's `d) default`
+/// branch can reuse it without repeating the error-formatting boilerplate.
+fn report_mcp_sync(config_dir: &std::path::Path) {
+    match crate::mcp::sync_mcp_to_profile(config_dir) {
+        Ok(0) => {}
+        Ok(n) => println!(
+            "{} synced {} User MCP server(s) from {} into {}",
+            "↳".dimmed(),
+            n,
+            "~/.claude.json".dimmed(),
+            format!("{}/.claude.json", config_dir.display()).dimmed(),
+        ),
+        Err(e) => eprintln!(
+            "{} could not sync user MCPs: {}",
+            "warning:".yellow().bold(),
+            e
+        ),
+    }
 }
 
 /// Remove a profile from the config.
@@ -434,6 +465,94 @@ pub fn profile_default(args: &[String]) -> Result<(), CyoloError> {
     }
 }
 
+/// Copy `mcpServers` from `~/.claude.json` into one or every registered
+/// profile's `.claude.json` (and, with `--all`, also into Claude Code's own
+/// `~/.claude/.claude.json` so the picker's `d) default` option sees the
+/// same User MCPs).
+///
+/// Usage:
+///   `cyolo profile sync-mcp <name>`   — sync a single profile
+///   `cyolo profile sync-mcp --all`    — sync every registered profile + `~/.claude`
+pub fn sync_mcp(args: &[String]) -> Result<(), CyoloError> {
+    if args.len() != 1 {
+        eprintln!(
+            "{} cyolo profile sync-mcp <name|--all>",
+            "Usage:".yellow().bold()
+        );
+        return Err(CyoloError::NonZeroExit(1));
+    }
+
+    config::ensure_dir()?;
+    let cfg = CyoloConfig::load()?;
+
+    if args[0] == "--all" {
+        // Every registered profile, plus `~/.claude` itself so the picker's
+        // `d) default` option reads the same User MCPs the user already has
+        // in `~/.claude.json`.
+        let mut targets: Vec<(String, PathBuf)> = cfg
+            .profiles
+            .iter()
+            .map(|(name, p)| (name.clone(), p.config_dir.clone()))
+            .collect();
+        if let Some(home) = dirs::home_dir() {
+            let source_dir = home.join(".claude");
+            if !targets.iter().any(|(_, p)| p == &source_dir) {
+                targets.push(("(default ~/.claude)".to_string(), source_dir));
+            }
+        }
+        if targets.is_empty() {
+            println!(
+                "{}",
+                "No profiles registered. Run: cyolo profile add <name>".dimmed()
+            );
+            return Ok(());
+        }
+        for (name, dir) in &targets {
+            sync_one_profile(name, dir);
+        }
+        Ok(())
+    } else {
+        let name = &args[0];
+        let profile = cfg
+            .profiles
+            .get(name)
+            .ok_or_else(|| CyoloError::ProfileNotFound { name: name.clone() })?;
+        let config_dir = expand_tilde(&profile.config_dir.to_string_lossy());
+        sync_one_profile(name, &config_dir);
+        Ok(())
+    }
+}
+
+/// Run the MCP sync for a single profile and print a one-line report.
+///
+/// Always returns cleanly: individual-profile failures are surfaced as
+/// warnings, because under `--all` we want to keep going through every
+/// registered profile even if one of them has a malformed `.claude.json`.
+fn sync_one_profile(name: &str, config_dir: &Path) {
+    match crate::mcp::sync_mcp_to_profile(config_dir) {
+        Ok(0) => println!(
+            "  {} {}  {}",
+            name.bold(),
+            "→".dimmed(),
+            "nothing to sync (source missing or empty)".dimmed()
+        ),
+        Ok(n) => println!(
+            "  {} {}  synced {} MCP server(s) into {}",
+            name.green().bold(),
+            "→".dimmed(),
+            n,
+            format!("{}/.claude.json", config_dir.display()).dimmed(),
+        ),
+        Err(e) => eprintln!(
+            "  {} {}  {} {}",
+            name.red().bold(),
+            "→".dimmed(),
+            "sync failed:".yellow().bold(),
+            e
+        ),
+    }
+}
+
 /// What the interactive init menu resolved from the user's input line.
 #[derive(Debug, PartialEq)]
 pub(crate) enum MenuChoice {
@@ -678,6 +797,13 @@ pub(crate) fn interactive_init_menu() -> Result<PickerOutcome, CyoloError> {
             // Pin the directory to `~/.claude` via an inline-`config_dir`
             // marker. Caller should re-resolve and launch claude normally.
             write_default_marker()?;
+            // Seed `~/.claude/.claude.json` — when claude runs with
+            // `CLAUDE_CONFIG_DIR=~/.claude` it reads that file (not the
+            // `$HOME/.claude.json` it would read with env unset), so the
+            // User MCPs need to be mirrored there too.
+            if let Some(home) = dirs::home_dir() {
+                report_mcp_sync(&home.join(".claude"));
+            }
             Ok(PickerOutcome::MarkerWritten)
         }
         MenuChoice::Quit => {
@@ -803,6 +929,26 @@ mod tests {
         setup();
         let result = dispatch(&args(&["default"]));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dispatch_routes_to_sync_mcp() {
+        // `sync-mcp` with a missing name must surface `ProfileNotFound`
+        // (contains "not found") rather than the unknown-command error
+        // ("unknown profile command"). Proves dispatch routing without
+        // hitting the real ~/.claude.json or a registered profile.
+        setup();
+        let result = dispatch(&args(&["sync-mcp", "__test_no_such_profile__"]));
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not found"), "expected ProfileNotFound, got: {msg}");
+    }
+
+    #[test]
+    fn test_sync_mcp_missing_arg_is_usage_error() {
+        setup();
+        assert!(sync_mcp(&args(&[])).is_err());
+        assert!(sync_mcp(&args(&["a", "b"])).is_err());
     }
 
     #[test]

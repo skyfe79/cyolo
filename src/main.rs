@@ -4,6 +4,7 @@ mod detect;
 mod diet;
 mod error;
 mod git;
+mod mcp;
 mod profile;
 mod runner;
 mod symlink;
