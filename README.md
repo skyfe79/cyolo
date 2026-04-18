@@ -305,8 +305,10 @@ Details:
   at resolution time, so the marker stays portable across machines. Useful
   when you want this tree to follow Claude Code's default account regardless
   of any `default` profile you set later via `cyolo profile default`.
-- **Quit** (`q`): no marker is written; `claude` still launches with an unset
-  `CLAUDE_CONFIG_DIR`, matching the original `cyolo()` shell function.
+- **Quit** (`q`): exits cyolo cleanly without writing a marker and without
+  launching claude. The original pass-through to `~/.claude` (unset
+  `CLAUDE_CONFIG_DIR`) is still in effect for the non-picker paths —
+  `cyolo <args...>` and non-TTY invocations.
 - **New** (`n`): `add` registers a fresh profile and launches `claude /login`
   so you can authenticate. When that session exits, cyolo stops — run `cyolo`
   again to start a working session with the new profile.
