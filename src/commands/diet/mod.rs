@@ -1133,6 +1133,11 @@ pub(crate) fn remove_session_folders(
 /// Thin wrapper around [`DietCli`] that kept the same signature for tests
 /// across the clap migration. New code should prefer `DietCli::try_parse_from`
 /// + `into_options` directly.
+///
+/// `#[cfg(test)]`-gated because `dispatch` now parses through `DietCli`
+/// directly — this wrapper only exists to keep the pre-migration test
+/// suite compiling unchanged. Release builds don't need it.
+#[cfg(test)]
 fn parse_diet_args(args: &[String]) -> Result<DietOptions, CyoloError> {
     let cli = DietCli::try_parse_from(args).map_err(|e| {
         // Print the clap error for user visibility (tests capture stderr),
