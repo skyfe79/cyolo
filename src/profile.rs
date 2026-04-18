@@ -441,6 +441,10 @@ pub(crate) enum MenuChoice {
     Pick(usize),
     /// Register a fresh profile then bind to it.
     New,
+    /// Pin this directory to Claude Code's own default config (`~/.claude`)
+    /// by writing an inline-`config_dir` marker. Always available even when
+    /// no profiles are registered.
+    Default,
     /// Do nothing, exit cleanly.
     Quit,
     /// Input did not match any option.
@@ -467,11 +471,12 @@ pub(crate) enum PickerOutcome {
 /// Parse one line of user input from the interactive init menu.
 ///
 /// Accepts:
-///   * `<digit>`     — 1-based index; returned as 0-based `Pick`
-///   * `n` / `new`   — `New`
-///   * `q` / `quit`  — `Quit`
-///   * empty line    — `Quit` (treat blank enter as "not now")
-///   * anything else — `Invalid`
+///   * `<digit>`         — 1-based index; returned as 0-based `Pick`
+///   * `n` / `new`       — `New`
+///   * `d` / `default`   — `Default` (pin to `~/.claude`)
+///   * `q` / `quit`      — `Quit`
+///   * empty line        — `Quit` (treat blank enter as "not now")
+///   * anything else     — `Invalid`
 pub(crate) fn parse_menu_input(input: &str, profile_count: usize) -> MenuChoice {
     let s = input.trim().to_lowercase();
     if s.is_empty() || s == "q" || s == "quit" {
@@ -479,6 +484,9 @@ pub(crate) fn parse_menu_input(input: &str, profile_count: usize) -> MenuChoice 
     }
     if s == "n" || s == "new" {
         return MenuChoice::New;
+    }
+    if s == "d" || s == "default" {
+        return MenuChoice::Default;
     }
     if let Ok(n) = s.parse::<usize>()
         && n >= 1
@@ -521,6 +529,31 @@ fn read_line_trimmed() -> Result<String, CyoloError> {
 /// stays untracked without modifying the committed `.gitignore`. Failures
 /// here are swallowed — marker creation succeeds either way.
 fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
+    write_marker(
+        &serde_json::json!({"name": name}),
+        &format!("profile: {}", name.green()),
+    )
+}
+
+/// Write a `.claude-profile.json` that pins this directory to Claude Code's
+/// own default config directory (`~/.claude`). The tilde is kept literal in
+/// the file so the marker stays portable across machines; `detect` expands
+/// it at resolution time.
+fn write_default_marker() -> Result<(), CyoloError> {
+    write_marker(
+        &serde_json::json!({"config_dir": "~/.claude"}),
+        &format!("config_dir: {}", "~/.claude".green()),
+    )
+}
+
+/// Shared body for `write_profile_marker` and `write_default_marker`.
+///
+/// Serializes `payload` into `.claude-profile.json`, refusing to overwrite
+/// an existing file. After a successful write, best-effort appends
+/// `.claude-profile.json` to `<gitdir>/info/exclude` when the cwd is inside
+/// a git repo. `label_suffix` is shown in parentheses after the success
+/// message (e.g. "profile: work" or "config_dir: ~/.claude").
+fn write_marker(payload: &serde_json::Value, label_suffix: &str) -> Result<(), CyoloError> {
     let cwd = std::env::current_dir().map_err(|e| CyoloError::ConfigIoError {
         context: "could not determine current directory".into(),
         source: e,
@@ -537,7 +570,7 @@ fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
         return Err(CyoloError::NonZeroExit(1));
     }
 
-    let contents = serde_json::to_string_pretty(&serde_json::json!({"name": name}))
+    let contents = serde_json::to_string_pretty(payload)
         .expect("JSON serialization of simple object cannot fail");
     use std::io::Write as _;
     let mut file = std::fs::OpenOptions::new()
@@ -555,9 +588,8 @@ fn write_profile_marker(name: &str) -> Result<(), CyoloError> {
         })?;
 
     println!(
-        "Created {} (profile: {})",
-        ".claude-profile.json".green(),
-        name.green()
+        "Created {} ({label_suffix})",
+        ".claude-profile.json".green()
     );
 
     // Best-effort: mark the file as git-ignored via <gitdir>/info/exclude so
@@ -612,8 +644,9 @@ pub(crate) fn interactive_init_menu() -> Result<PickerOutcome, CyoloError> {
             );
         }
     }
-    println!("  {}) {}", "n".bold(), "new    register a new profile + /login");
-    println!("  {}) {}", "q".bold(), "quit   do nothing");
+    println!("  {}) {}", "n".bold(), "new      register a new profile + /login");
+    println!("  {}) {}", "d".bold(), "default  pin this directory to ~/.claude (Claude Code default)");
+    println!("  {}) {}", "q".bold(), "quit     do nothing");
     println!();
 
     use std::io::Write as _;
@@ -640,6 +673,12 @@ pub(crate) fn interactive_init_menu() -> Result<PickerOutcome, CyoloError> {
             add(&[new_name.clone()])?;
             write_profile_marker(&new_name)?;
             Ok(PickerOutcome::NewProfileRegistered)
+        }
+        MenuChoice::Default => {
+            // Pin the directory to `~/.claude` via an inline-`config_dir`
+            // marker. Caller should re-resolve and launch claude normally.
+            write_default_marker()?;
+            Ok(PickerOutcome::MarkerWritten)
         }
         MenuChoice::Quit => {
             println!("{}", "No change. Run `cyolo profile init <name>` when ready.".dimmed());
@@ -870,6 +909,17 @@ mod tests {
         assert_eq!(parse_menu_input("N", 2), MenuChoice::New);
         assert_eq!(parse_menu_input("new", 2), MenuChoice::New);
         assert_eq!(parse_menu_input("NEW", 2), MenuChoice::New);
+    }
+
+    #[test]
+    fn test_parse_menu_input_default_aliases() {
+        assert_eq!(parse_menu_input("d", 2), MenuChoice::Default);
+        assert_eq!(parse_menu_input("D", 2), MenuChoice::Default);
+        assert_eq!(parse_menu_input("default", 2), MenuChoice::Default);
+        assert_eq!(parse_menu_input("DEFAULT", 2), MenuChoice::Default);
+        // `default` must also work when no profiles are registered — the
+        // option is always available and never index-sensitive.
+        assert_eq!(parse_menu_input("d", 0), MenuChoice::Default);
     }
 
     #[test]

@@ -277,8 +277,9 @@ $ cyolo
 
   1) personal  skyfe79@gmail.com
   2) work      work@example.com
-  n) new    register a new profile + /login
-  q) quit   do nothing
+  n) new      register a new profile + /login
+  d) default  pin this directory to ~/.claude (Claude Code default)
+  q) quit     do nothing
 
 Selection: 2
 Created .claude-profile.json (profile: work)
@@ -299,6 +300,11 @@ Details:
   the committed `.gitignore`. Idempotent — re-running does nothing if the
   entry is already there. This applies to both the picker flow and any
   explicit `cyolo profile init <name>`.
+- **Default** (`d`): pins this directory to `~/.claude` by writing a marker
+  with `{"config_dir": "~/.claude"}`. The tilde is kept literal and expanded
+  at resolution time, so the marker stays portable across machines. Useful
+  when you want this tree to follow Claude Code's default account regardless
+  of any `default` profile you set later via `cyolo profile default`.
 - **Quit** (`q`): no marker is written; `claude` still launches with an unset
   `CLAUDE_CONFIG_DIR`, matching the original `cyolo()` shell function.
 - **New** (`n`): `add` registers a fresh profile and launches `claude /login`
