@@ -143,6 +143,7 @@ always run `cyolo profile login <name>` later.
 
 Ten subcommands cover the full profile lifecycle. Every subcommand also
 accepts `--help` for a focused reference (e.g. `cyolo profile add --help`).
+Two aliases are recognised: `rm` ⇌ `remove`, `list` ⇌ `ls`.
 
 ### add
 
@@ -253,13 +254,19 @@ Resolution order:
 2. No argument, default profile set → use the default.
 3. No argument, no default, running on a TTY → **interactive menu** shows
    all registered profiles with their emails, plus `n` (register a new
-   profile and `/login`) and `q` (do nothing).
+   profile and `/login`), `d` (pin this directory to `~/.claude`), and
+   `q` (do nothing).
 4. No argument, no default, non-TTY → error (safe for CI / scripts).
 
 ```bash
 cyolo profile init work      # explicit
 cyolo profile init           # picks default, or pops the menu
 ```
+
+The same menu fires on a bare interactive `cyolo` invocation when
+nothing resolves — see *Interactive picker when nothing is bound*
+below for the full option breakdown (including `d`'s MCP sync side
+effect and `q`'s clean-exit behavior).
 
 Menu example:
 
@@ -269,8 +276,9 @@ Menu example:
   1) personal  skyfe79@gmail.com
   2) work      work@example.com
   3) client-a  (needs login)
-  n) new    register a new profile + /login
-  q) quit   do nothing
+  n) new      register a new profile + /login
+  d) default  pin this directory to ~/.claude (Claude Code default)
+  q) quit     do nothing
 
 Selection: 2
 Created .claude-profile.json (profile: work)
