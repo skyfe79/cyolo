@@ -141,7 +141,9 @@ always run `cyolo profile login <name>` later.
 
 ## Usage — profile subcommands
 
-Nine subcommands cover the full profile lifecycle.
+Ten subcommands cover the full profile lifecycle. Every subcommand also
+accepts `--help` for a focused reference (e.g. `cyolo profile add --help`).
+Two aliases are recognised: `rm` ⇌ `remove`, `list` ⇌ `ls`.
 
 ### add
 
@@ -162,11 +164,14 @@ account to this profile's Keychain entry. Pass `--no-login` to skip the
 launch (useful when you are re-registering a profile that already has a
 valid token, or when running in CI).
 
-Once the login session (or `--no-login`) completes, `add` also seeds
+Once the login session (or `--no-login`) settles, `add` seeds
 `<config_dir>/.claude.json` with the `mcpServers` object from
 `~/.claude.json` — see [`sync-mcp`](#sync-mcp) for details. The first
 time you see `↳ synced N User MCP server(s)` in the output, that is
-this step running.
+this step running. **The sync runs even if `/login` exits abnormally**
+(e.g. Ctrl+C, network error) — a warning is printed and the profile is
+left with MCPs seeded so a later `cyolo profile login <name>` only
+needs to retry auth, not the MCP plumbing.
 
 ```bash
 cyolo profile add client ~/.claude-client-a
@@ -249,13 +254,19 @@ Resolution order:
 2. No argument, default profile set → use the default.
 3. No argument, no default, running on a TTY → **interactive menu** shows
    all registered profiles with their emails, plus `n` (register a new
-   profile and `/login`) and `q` (do nothing).
+   profile and `/login`), `d` (pin this directory to `~/.claude`), and
+   `q` (do nothing).
 4. No argument, no default, non-TTY → error (safe for CI / scripts).
 
 ```bash
 cyolo profile init work      # explicit
 cyolo profile init           # picks default, or pops the menu
 ```
+
+The same menu fires on a bare interactive `cyolo` invocation when
+nothing resolves — see *Interactive picker when nothing is bound*
+below for the full option breakdown (including `d`'s MCP sync side
+effect and `q`'s clean-exit behavior).
 
 Menu example:
 
@@ -265,8 +276,9 @@ Menu example:
   1) personal  skyfe79@gmail.com
   2) work      work@example.com
   3) client-a  (needs login)
-  n) new    register a new profile + /login
-  q) quit   do nothing
+  n) new      register a new profile + /login
+  d) default  pin this directory to ~/.claude (Claude Code default)
+  q) quit     do nothing
 
 Selection: 2
 Created .claude-profile.json (profile: work)
