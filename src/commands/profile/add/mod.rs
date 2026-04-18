@@ -110,6 +110,14 @@ pub fn run(args: Args) -> Result<(), CyoloError> {
     //   * `--no-login`
     //   * `config_dir` resolves to `~/.claude` (the source directory — the
     //     default Keychain entry is already populated by prior usage).
+    //
+    // A non-zero exit from `/login` (user hit Ctrl+C, claude crashed, network
+    // failed) must NOT short-circuit the MCP sync below: the profile is
+    // already persisted in `~/.cyolo/config.json` — bailing now would leave
+    // the user with a registered profile that has no `mcpServers` seeded,
+    // producing the "User MCPs is empty" bug in every future session until
+    // they manually run `cyolo profile sync-mcp <name>`. Instead, surface the
+    // login failure as a warning and fall through.
     if !no_login && !symlink::is_source_dir(&config_dir) {
         println!();
         println!(
@@ -121,12 +129,25 @@ pub fn run(args: Args) -> Result<(), CyoloError> {
             "{}",
             "  (skip this with --no-login on `cyolo profile add`)".dimmed()
         );
-        runner::run_claude_login(&config_dir)?;
+        if let Err(e) = runner::run_claude_login(&config_dir) {
+            // `CyoloError::NonZeroExit` prints empty via `thiserror`; surface
+            // its code explicitly so the warning is actually informative.
+            let detail = match e {
+                CyoloError::NonZeroExit(code) => format!("exit code {code}"),
+                other => other.to_string(),
+            };
+            eprintln!(
+                "{} claude /login exited abnormally ({detail}); continuing with MCP sync anyway. \
+                 Re-run `cyolo profile login {}` when ready.",
+                "warning:".yellow().bold(),
+                name.bold(),
+            );
+        }
     }
 
     // Layer `mcpServers` onto whatever claude wrote into `.claude.json` (or
-    // into an empty file for `--no-login`). Best-effort — a sync failure
-    // must not make the whole `add` fail.
+    // into an empty file for `--no-login` / aborted-login). Best-effort —
+    // a sync failure must not make the whole `add` fail.
     report_mcp_sync(&config_dir);
 
     Ok(())
