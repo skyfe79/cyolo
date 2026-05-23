@@ -145,6 +145,9 @@ pub fn interactive_init_menu() -> Result<PickerOutcome, CyoloError> {
                 config_dir: None,
                 no_share: false,
                 no_login: false,
+                base_url: None,
+                api_key: None,
+                model: None,
             })?;
             write_profile_marker(&new_name)?;
             Ok(PickerOutcome::NewProfileRegistered)

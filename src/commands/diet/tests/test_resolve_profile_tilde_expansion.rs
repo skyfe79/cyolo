@@ -10,6 +10,9 @@ fn test_resolve_profile_tilde_expansion() {
     profiles.insert("custom".to_string(), Profile {
         name: "custom".to_string(),
         config_dir: PathBuf::from("~/.claude-custom"),
+        anthropic_base_url: None,
+        anthropic_api_key: None,
+        anthropic_model: None,
     });
     let cfg = CyoloConfig { default: None, profiles };
 

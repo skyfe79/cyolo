@@ -10,6 +10,9 @@ fn test_resolve_profile_not_found() {
     profiles.insert("work".to_string(), Profile {
         name: "work".to_string(),
         config_dir: PathBuf::from("/home/user/.claude-work"),
+        anthropic_base_url: None,
+        anthropic_api_key: None,
+        anthropic_model: None,
     });
     let cfg = CyoloConfig { default: None, profiles };
 

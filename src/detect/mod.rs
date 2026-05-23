@@ -110,6 +110,12 @@ pub struct ResolvedProfile {
     pub config_dir: PathBuf,
     /// Where this resolution came from: the walk-up file path or `"default"`.
     pub source: String,
+    /// Optional third-party API base URL (e.g. `https://api.deepseek.com`).
+    pub anthropic_base_url: Option<String>,
+    /// Optional API key for the provider (overrides Keychain auth).
+    pub anthropic_api_key: Option<String>,
+    /// Optional model name override (e.g. `deepseek-chat`).
+    pub anthropic_model: Option<String>,
 }
 
 /// Resolve a profile from a walk-up result and config, without disk I/O.
@@ -132,15 +138,21 @@ fn resolve_with(
                 name: Some(name.clone()),
                 config_dir: profile.config_dir.clone(),
                 source,
+                anthropic_base_url: profile.anthropic_base_url.clone(),
+                anthropic_api_key: profile.anthropic_api_key.clone(),
+                anthropic_model: profile.anthropic_model.clone(),
             }));
         }
 
-        // config_dir variant
+        // config_dir variant — no registered profile, so no env-var injection
         if let Some(ref dir) = pf.config_dir {
             return Ok(Some(ResolvedProfile {
                 name: None,
                 config_dir: expand_tilde(dir),
                 source,
+                anthropic_base_url: None,
+                anthropic_api_key: None,
+                anthropic_model: None,
             }));
         }
     }
@@ -157,6 +169,9 @@ fn resolve_with(
             name: Some(default_name.clone()),
             config_dir: profile.config_dir.clone(),
             source: "default".into(),
+            anthropic_base_url: profile.anthropic_base_url.clone(),
+            anthropic_api_key: profile.anthropic_api_key.clone(),
+            anthropic_model: profile.anthropic_model.clone(),
         }));
     }
 
@@ -175,7 +190,7 @@ fn resolve_with(
 pub fn resolve_profile() -> Result<Option<ResolvedProfile>, CyoloError> {
     let found = find_profile_file()?;
 
-    // config_dir-only walk-up doesn't need the global config
+    // config_dir-only walk-up doesn't need the global config; no env-var injection
     if let Some((ref path, ref pf)) = found
         && pf.name.is_none()
         && let Some(ref dir) = pf.config_dir
@@ -184,6 +199,9 @@ pub fn resolve_profile() -> Result<Option<ResolvedProfile>, CyoloError> {
             name: None,
             config_dir: expand_tilde(dir),
             source: path.display().to_string(),
+            anthropic_base_url: None,
+            anthropic_api_key: None,
+            anthropic_model: None,
         }));
     }
 

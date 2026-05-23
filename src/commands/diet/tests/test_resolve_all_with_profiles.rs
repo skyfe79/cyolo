@@ -10,10 +10,16 @@ fn test_resolve_all_with_profiles() {
     profiles.insert("main".to_string(), Profile {
         name: "main".to_string(),
         config_dir: PathBuf::from("/home/user/.claude"),
+        anthropic_base_url: None,
+        anthropic_api_key: None,
+        anthropic_model: None,
     });
     profiles.insert("work".to_string(), Profile {
         name: "work".to_string(),
         config_dir: PathBuf::from("/home/user/.claude-work"),
+        anthropic_base_url: None,
+        anthropic_api_key: None,
+        anthropic_model: None,
     });
     let cfg = CyoloConfig { default: None, profiles };
 

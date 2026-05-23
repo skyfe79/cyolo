@@ -11,6 +11,9 @@ fn sample_config() -> CyoloConfig {
         Profile {
             name: "work".to_string(),
             config_dir: PathBuf::from("/tmp/.claude-work"),
+            anthropic_base_url: None,
+            anthropic_api_key: None,
+            anthropic_model: None,
         },
     );
     CyoloConfig {

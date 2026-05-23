@@ -27,6 +27,15 @@ pub(crate) fn build_env(profile: Option<&ResolvedProfile>) -> Vec<(String, Strin
             "CLAUDE_CONFIG_DIR".to_string(),
             profile.config_dir.to_string_lossy().into_owned(),
         ));
+        if let Some(url) = &profile.anthropic_base_url {
+            env.push(("ANTHROPIC_BASE_URL".to_string(), url.clone()));
+        }
+        if let Some(key) = &profile.anthropic_api_key {
+            env.push(("ANTHROPIC_API_KEY".to_string(), key.clone()));
+        }
+        if let Some(model) = &profile.anthropic_model {
+            env.push(("ANTHROPIC_MODEL".to_string(), model.clone()));
+        }
     }
     env
 }

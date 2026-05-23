@@ -1,3 +1,4 @@
 mod test_resolved_profile_sets_claude_config_dir;
 mod test_unresolved_profile_omits_claude_config_dir;
 mod test_tilde_prefixed_config_dir_is_passed_through_verbatim;
+mod test_anthropic_env_vars_injected;

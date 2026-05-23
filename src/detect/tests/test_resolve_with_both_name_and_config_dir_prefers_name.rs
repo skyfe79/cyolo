@@ -13,6 +13,9 @@ fn test_resolve_with_both_name_and_config_dir_prefers_name() {
         Profile {
             name: "work".into(),
             config_dir: PathBuf::from("/home/user/.claude-work"),
+            anthropic_base_url: None,
+            anthropic_api_key: None,
+            anthropic_model: None,
         },
     );
     let config = CyoloConfig {

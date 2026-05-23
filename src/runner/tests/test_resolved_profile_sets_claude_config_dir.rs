@@ -6,6 +6,9 @@ fn profile(dir: &str) -> ResolvedProfile {
         name: Some("test".into()),
         config_dir: PathBuf::from(dir),
         source: "test".into(),
+        anthropic_base_url: None,
+        anthropic_api_key: None,
+        anthropic_model: None,
     }
 }
 
