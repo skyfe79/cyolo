@@ -167,11 +167,20 @@ fn prompt_provider() -> Result<ProviderChoice, CyoloError> {
 fn prompt_deepseek_fields(
 ) -> Result<(Option<String>, Option<String>, Option<String>), CyoloError> {
     println!();
-    println!(
-        "  {} base_url: {}",
-        "→".cyan().bold(),
-        DEEPSEEK_BASE_URL.green()
+
+    // Base URL (preset as default, but user can override)
+    print!(
+        "  {} [{}]: ",
+        "Base URL".bold(),
+        DEEPSEEK_BASE_URL.dimmed()
     );
+    std::io::stdout().flush().ok();
+    let base_url_input = read_line_trimmed()?;
+    let base_url = if base_url_input.is_empty() {
+        DEEPSEEK_BASE_URL.to_string()
+    } else {
+        base_url_input
+    };
 
     // API key
     print!(
@@ -197,7 +206,7 @@ fn prompt_deepseek_fields(
         Some(model_input)
     };
 
-    Ok((Some(DEEPSEEK_BASE_URL.to_string()), api_key, model))
+    Ok((Some(base_url), api_key, model))
 }
 
 fn prompt_custom_fields(
