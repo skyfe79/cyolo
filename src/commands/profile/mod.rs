@@ -23,8 +23,10 @@ pub mod login;
 pub mod marker;
 pub mod picker;
 pub mod rm;
+pub mod set_env;
 pub mod sync_mcp;
 pub mod whoami;
+pub mod wizard;
 
 #[cfg(test)]
 mod tests;
@@ -70,6 +72,11 @@ pub enum ProfileCommand {
     /// Copy mcpServers from ~/.claude.json into a profile's .claude.json.
     #[command(name = "sync-mcp")]
     SyncMcp(sync_mcp::Args),
+    /// Set or unset ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY / ANTHROPIC_MODEL for a profile.
+    #[command(name = "set-env", alias = "set-model")]
+    SetEnv(set_env::Args),
+    /// Guided interactive profile creation wizard.
+    Wizard,
 }
 
 /// Parse `args` (the argv slice *after* "profile"), dispatch, and return.
@@ -105,6 +112,8 @@ pub fn dispatch(args: &[String]) -> Result<(), CyoloError> {
         Some(ProfileCommand::Init(a)) => init::run(a),
         Some(ProfileCommand::Default(a)) => default_cmd::run(a),
         Some(ProfileCommand::SyncMcp(a)) => sync_mcp::run(a),
+        Some(ProfileCommand::SetEnv(a)) => set_env::run(a),
+        Some(ProfileCommand::Wizard) => wizard::run(),
     }
 }
 

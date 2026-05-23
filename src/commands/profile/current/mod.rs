@@ -18,6 +18,15 @@ pub fn run() -> Result<(), CyoloError> {
                 profile.config_dir.display().to_string().green()
             );
             println!("{} {}", "source:".bold(), profile.source.green());
+            if let Some(url) = &profile.anthropic_base_url {
+                println!("{} {}", "base_url:".bold(), url.green());
+            }
+            if let Some(model) = &profile.anthropic_model {
+                println!("{} {}", "model:".bold(), model.green());
+            }
+            if profile.anthropic_api_key.is_some() {
+                println!("{} {}", "api_key:".bold(), "***".dimmed());
+            }
         }
         None => {
             println!(

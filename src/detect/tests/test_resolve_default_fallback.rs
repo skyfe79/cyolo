@@ -11,6 +11,9 @@ fn test_resolve_default_fallback() {
         Profile {
             name: "main".into(),
             config_dir: PathBuf::from("/home/user/.claude-main"),
+            anthropic_base_url: None,
+            anthropic_api_key: None,
+            anthropic_model: None,
         },
     );
     let config = CyoloConfig {

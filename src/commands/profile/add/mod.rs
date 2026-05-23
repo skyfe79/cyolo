@@ -26,6 +26,15 @@ pub struct Args {
     /// Skip auto-launching `claude` for `/login` after registration.
     #[arg(long)]
     pub no_login: bool,
+    /// Custom API base URL for third-party providers (e.g. https://api.deepseek.com).
+    #[arg(long)]
+    pub base_url: Option<String>,
+    /// API key for the provider. Stored in ~/.cyolo/config.json only, never in project files.
+    #[arg(long)]
+    pub api_key: Option<String>,
+    /// Model name override (e.g. deepseek-chat, deepseek-reasoner).
+    #[arg(long)]
+    pub model: Option<String>,
 }
 
 pub fn run(args: Args) -> Result<(), CyoloError> {
@@ -34,6 +43,9 @@ pub fn run(args: Args) -> Result<(), CyoloError> {
         config_dir,
         no_share,
         no_login,
+        base_url,
+        api_key,
+        model,
     } = args;
 
     // Resolve config_dir: use the provided path or default to ~/.claude-<name>.
@@ -87,6 +99,9 @@ pub fn run(args: Args) -> Result<(), CyoloError> {
         Profile {
             name: name.clone(),
             config_dir: config_dir.clone(),
+            anthropic_base_url: base_url.clone(),
+            anthropic_api_key: api_key.clone(),
+            anthropic_model: model.clone(),
         },
     );
     cfg.save()?;
@@ -104,6 +119,16 @@ pub fn run(args: Args) -> Result<(), CyoloError> {
         config_dir.display().to_string().green(),
         symlink_note
     );
+    if base_url.is_some() || model.is_some() {
+        let url_part = base_url.as_deref().unwrap_or("-");
+        let model_part = model.as_deref().unwrap_or("-");
+        println!(
+            "  {} provider: {}  model: {}",
+            "→".cyan().bold(),
+            url_part.green(),
+            model_part.green()
+        );
+    }
 
     // Auto-launch `claude /login` so the OAuth token lands in the Keychain
     // entry scoped to this profile's `CLAUDE_CONFIG_DIR`. Skipped when:

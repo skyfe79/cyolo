@@ -22,6 +22,12 @@ pub struct CyoloConfig {
 pub struct Profile {
     pub name: String,
     pub config_dir: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_model: Option<String>,
 }
 
 /// Return the cyolo config directory inside `home`: `{home}/.cyolo/`.

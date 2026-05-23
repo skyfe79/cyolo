@@ -11,6 +11,9 @@ fn make_config(profiles: &[(&str, &str)], default: Option<&str>) -> CyoloConfig 
             Profile {
                 name: name.to_string(),
                 config_dir: PathBuf::from(dir),
+                anthropic_base_url: None,
+                anthropic_api_key: None,
+                anthropic_model: None,
             },
         );
     }
