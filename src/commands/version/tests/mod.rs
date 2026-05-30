@@ -1,0 +1,4 @@
+mod test_parse_npm_versions_extracts_sorted;
+mod test_parse_npm_versions_reads_latest;
+mod test_parse_npm_versions_invalid_json;
+mod test_parse_npm_versions_missing_versions;

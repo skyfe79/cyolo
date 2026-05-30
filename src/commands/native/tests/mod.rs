@@ -1,0 +1,8 @@
+mod test_sort_versions_newest_first;
+mod test_installed_versions_in_lists_sorted;
+mod test_installed_versions_in_skips_dotfiles;
+mod test_discover_from_non_symlink_errors;
+mod test_discover_from_symlink_resolves;
+mod test_switch_in_repoints_symlink;
+mod test_switch_in_missing_version_errors;
+mod test_switch_in_clears_stale_tmp;
