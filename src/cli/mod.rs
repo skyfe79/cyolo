@@ -3,6 +3,8 @@ use owo_colors::OwoColorize;
 use crate::commands::diet;
 use crate::commands::profile;
 use crate::commands::profile::picker;
+use crate::commands::update;
+use crate::commands::version;
 use crate::detect;
 use crate::error::CyoloError;
 use crate::runner;
@@ -10,8 +12,8 @@ use crate::util;
 
 /// Top-level command classification.
 ///
-/// cyolo-specific subcommands (`profile`, `diet`, `help`) are handled in
-/// process. Everything else is forwarded verbatim to
+/// cyolo-specific subcommands (`profile`, `diet`, `version`, `update <ver>`,
+/// `help`) are handled in process. Everything else is forwarded verbatim to
 /// `claude --dangerously-skip-permissions`.
 #[derive(Debug, PartialEq)]
 pub enum Command {
@@ -19,6 +21,10 @@ pub enum Command {
     Profile(Vec<String>),
     /// `cyolo diet <...>` → config cleanup
     Diet(Vec<String>),
+    /// `cyolo version <...>` → list installed / upstream Claude Code versions
+    Version(Vec<String>),
+    /// `cyolo update <version>` → switch the active version via the launcher symlink
+    Update(Vec<String>),
     /// `cyolo help` / `cyolo --help` / `cyolo -h` → print cyolo's own help
     Help,
     /// Everything else → `claude --dangerously-skip-permissions <args>`
@@ -30,6 +36,17 @@ pub fn classify(args: &[String]) -> Command {
     match args.first().map(|s| s.as_str()) {
         Some("profile") => Command::Profile(args[1..].to_vec()),
         Some("diet") => Command::Diet(args[1..].to_vec()),
+        Some("version") => Command::Version(args[1..].to_vec()),
+        // `update` is split three ways: `--help`/`-h` shows cyolo's own
+        // version-switch help; a positional `<version>` switches locally; and
+        // bare `cyolo update` (or any other flag) falls through to `claude
+        // update` — Claude Code's native auto-updater — preserving the
+        // documented pass-through.
+        Some("update") => match args.get(1).map(|s| s.as_str()) {
+            Some("--help") | Some("-h") => Command::Update(args[1..].to_vec()),
+            Some(a) if !a.starts_with('-') => Command::Update(args[1..].to_vec()),
+            _ => Command::Claude(args.to_vec()),
+        },
         Some("help") | Some("--help") | Some("-h") => Command::Help,
         _ => Command::Claude(args.to_vec()),
     }
@@ -42,6 +59,8 @@ pub fn route() -> Result<(), CyoloError> {
     match classify(&args) {
         Command::Profile(args) => profile::dispatch(&args),
         Command::Diet(args) => diet::dispatch(&args),
+        Command::Version(args) => version::dispatch(&args),
+        Command::Update(args) => update::dispatch(&args),
         Command::Help => {
             print_help();
             Ok(())
@@ -99,9 +118,11 @@ fn print_help() {
     // width but count as characters in `{:<N}` padding — so we color the name
     // AFTER composing the visible column.
     println!("{}", "Cyolo subcommands (handled in-process):".bold());
-    println!("  {}{}  Manage per-account config directories", "profile".green(), " ...    ");
-    println!("  {}{}  Report / reclaim orphaned project data + caches", "diet".green(), " ...       ");
-    println!("  {}{}  Show this message (also: --help / -h)", "help".green(), "           ");
+    println!("  {}{}  Manage per-account config directories", "profile".green(), " ...        ");
+    println!("  {}{}  Report / reclaim orphaned project data + caches", "diet".green(), " ...           ");
+    println!("  {}{}  List installed (and upstream) Claude Code versions", "version".green(), " [ls [remote]]");
+    println!("  {}{}  Switch the active version (already-installed builds only)", "update".green(), " <ver>    ");
+    println!("  {}{}  Show this message (also: --help / -h)", "help".green(), "               ");
     println!();
     println!("{}", "Anything else is forwarded as:".bold());
     println!("  claude --dangerously-skip-permissions <args...>");
@@ -111,10 +132,15 @@ fn print_help() {
     println!("  cyolo -p \"hi there\"            # one-shot prompt via claude -p");
     println!("  cyolo profile                  # detailed profile subcommand help");
     println!("  cyolo diet                     # dry-run cleanup report");
+    println!("  cyolo version ls               # list installed versions");
+    println!("  cyolo version ls remote        # list upstream releases (npm registry)");
+    println!("  cyolo update 2.1.156           # switch to an already-installed version");
     println!();
     println!("{}", "Notes:".dimmed());
-    println!("  {}", "* Run `claude update` directly — cyolo does not manage Claude Code's own version.".dimmed());
-    println!("  {}", "* `cyolo --version` currently prints claude's version (pass-through).".dimmed());
+    println!("  {}", "* `cyolo version` / `cyolo update <ver>` switch between native-install builds".dimmed());
+    println!("  {}", "  under ~/.local/share/claude/versions (symlink repoint — no download).".dimmed());
+    println!("  {}", "* Bare `cyolo update` passes through to `claude update` (fetches latest).".dimmed());
+    println!("  {}", "* `cyolo --version` prints claude's version (pass-through).".dimmed());
     println!("  {}", "* Full docs: https://github.com/skyfe79/cyolo".dimmed());
 }
 

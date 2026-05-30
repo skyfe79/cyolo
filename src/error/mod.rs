@@ -36,6 +36,17 @@ pub enum CyoloError {
 
     #[error("cyolo: invalid profile file {path}: {message}")]
     ProfileFileError { path: PathBuf, message: String },
+
+    #[error(
+        "cyolo: claude at {path} is not a symlinked native install — version switching needs the ~/.local/share/claude/versions layout.\n  (Install Claude Code with the native installer to enable `cyolo version` / `cyolo update`.)"
+    )]
+    NotNativeInstall { path: PathBuf },
+
+    #[error("cyolo: version '{version}' is not installed under the versions directory")]
+    VersionNotInstalled { version: String },
+
+    #[error("cyolo: couldn't fetch upstream versions: {message}")]
+    RemoteFetchFailed { message: String },
 }
 
 

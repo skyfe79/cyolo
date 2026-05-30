@@ -4,4 +4,6 @@ mod test_classify_help_variants;
 mod test_classify_passthrough_with_args;
 mod test_classify_no_args;
 mod test_classify_update_is_not_intercepted;
+mod test_classify_update_with_version;
+mod test_classify_version;
 mod test_classify_help_only_at_position_zero;
