@@ -79,7 +79,7 @@ cyolo                                            # resolves "work" via walk-up f
 
 ## Command structure
 
-cyolo only owns three top-level verbs. Everything else is forwarded verbatim
+cyolo owns a handful of top-level verbs. Everything else is forwarded verbatim
 to `claude --dangerously-skip-permissions` with the resolved profile's
 `CLAUDE_CONFIG_DIR`:
 
@@ -90,19 +90,44 @@ to `claude --dangerously-skip-permissions` with the resolved profile's
 | `cyolo profile <sub> --help` | Per-subcommand help (e.g. `cyolo profile add --help`) |
 | `cyolo diet ...` | Handled in-process via `clap` (see Usage — diet) |
 | `cyolo diet --help` | Diet flag reference |
+| `cyolo version [ls [remote]]` | List installed (and upstream) Claude Code versions |
+| `cyolo use <version>` | Switch the active version — **downloads it first if not installed** |
+| `cyolo update <version>` | Legacy form; redirects you to `cyolo use <version>` |
+| `cyolo update` | Passes through to `claude update` (fetches the latest build) |
 | `cyolo <anything else>` | `claude --dangerously-skip-permissions <args>` |
 
 The rule is unambiguous: if the first argument is `help`, `--help`, `-h`,
-`profile`, or `diet`, cyolo handles it. Everything else — including
-`--version`, `-p "..."`, `-c`, plain prompts, or unknown verbs — is
-transparent to claude.
+`profile`, `diet`, `version`, or `use`, cyolo handles it. `update` is handled
+only for a leftover positional `<version>` (redirect); bare `cyolo update` and
+any flag form pass through to `claude update`. Everything else — including
+`--version`, `-p "..."`, `-c`, plain prompts, or unknown verbs — is transparent
+to claude.
 
 A consequence: `cyolo --version` prints **Claude Code's** version, not
 cyolo's. To see cyolo's own version, run `cyolo help` (the first line
 shows `cyolo <VERSION>`).
 
-**`cyolo update` was removed** — run `claude update` directly instead.
-Upgrading Claude Code is not part of cyolo's scope.
+### Version switching
+
+`cyolo use <version>` repoints the native-install launcher symlink
+(`~/.local/bin/claude → ~/.local/share/claude/versions/<version>`) at the
+requested build:
+
+- **Already installed** → instant, atomic symlink repoint (no download).
+- **Not installed yet** → delegates to `claude install <version>` (Claude
+  Code's own installer — platform/Rosetta/musl detection + checksum
+  verification), then activates it. Pass `--yes`/`-y` to skip the download
+  confirmation prompt.
+
+```console
+$ cyolo use 2.1.158        # switch to 2.1.158, downloading it if needed
+$ cyolo version ls remote  # browse upstream releases
+$ cyolo update             # update to the latest build (claude update)
+```
+
+Version switching requires a **native** Claude Code install (the symlinked
+`~/.local/share/claude/versions` layout). An npm/global install yields a clear
+"not a native install" error.
 
 ## How multi-account OAuth actually works
 

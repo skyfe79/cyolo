@@ -4,21 +4,17 @@ fn args(strs: &[&str]) -> Vec<String> {
     strs.iter().map(|s| s.to_string()).collect()
 }
 
-/// `cyolo update <version>` is intercepted for local version switching, and
-/// `update --help`/`-h` is intercepted for cyolo's own help — both with the
-/// leading `update` token stripped before reaching the verb.
+/// The legacy `cyolo update <version>` positional form is still intercepted —
+/// but now only to redirect the user to `cyolo use` (the redirect itself lives
+/// in `update::dispatch`). The leading `update` token is stripped first.
+///
+/// Flag forms (`--help`/`-h`/`--check`) are NOT intercepted anymore: `update`
+/// means "update to latest", so they pass through to `claude update` — see
+/// `test_classify_update_is_not_intercepted`.
 #[test]
 fn test_classify_update_with_version() {
     assert_eq!(
         classify(&args(&["update", "2.1.156"])),
         Command::Update(args(&["2.1.156"]))
-    );
-    assert_eq!(
-        classify(&args(&["update", "--help"])),
-        Command::Update(args(&["--help"]))
-    );
-    assert_eq!(
-        classify(&args(&["update", "-h"])),
-        Command::Update(args(&["-h"]))
     );
 }

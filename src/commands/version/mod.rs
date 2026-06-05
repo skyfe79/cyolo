@@ -6,8 +6,9 @@
 //! - `cyolo version ls remote`  → list upstream releases from the npm registry,
 //!   marking which are already installed
 //!
-//! Switching between versions lives in the sibling [`crate::commands::update`]
-//! verb; this module is read-only.
+//! Switching between versions lives in the sibling [`crate::commands::use_cmd`]
+//! verb (`cyolo use <version>`, which also downloads a missing build); this
+//! module is read-only.
 
 use clap::{Parser, Subcommand, ValueEnum};
 use owo_colors::OwoColorize;
@@ -106,7 +107,7 @@ fn list_local() -> Result<(), CyoloError> {
         }
     }
     println!();
-    println!("{}", "Switch with `cyolo update <version>`.".dimmed());
+    println!("{}", "Switch with `cyolo use <version>`.".dimmed());
     Ok(())
 }
 
@@ -158,11 +159,11 @@ fn list_remote() -> Result<(), CyoloError> {
     println!();
     println!(
         "{}",
-        "Already-installed versions switch instantly with `cyolo update <version>`.".dimmed()
+        "Switch to any version with `cyolo use <version>` — installed ones switch".dimmed()
     );
     println!(
         "{}",
-        "To fetch a newer build, run `cyolo update` (Claude Code's native updater).".dimmed()
+        "instantly, others are downloaded first. `cyolo update` fetches the latest.".dimmed()
     );
     Ok(())
 }

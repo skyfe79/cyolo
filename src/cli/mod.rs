@@ -4,6 +4,7 @@ use crate::commands::diet;
 use crate::commands::profile;
 use crate::commands::profile::picker;
 use crate::commands::update;
+use crate::commands::use_cmd;
 use crate::commands::version;
 use crate::detect;
 use crate::error::CyoloError;
@@ -12,9 +13,9 @@ use crate::util;
 
 /// Top-level command classification.
 ///
-/// cyolo-specific subcommands (`profile`, `diet`, `version`, `update <ver>`,
-/// `help`) are handled in process. Everything else is forwarded verbatim to
-/// `claude --dangerously-skip-permissions`.
+/// cyolo-specific subcommands (`profile`, `diet`, `version`, `use <ver>`,
+/// `update <ver>`, `help`) are handled in process. Everything else is
+/// forwarded verbatim to `claude --dangerously-skip-permissions`.
 #[derive(Debug, PartialEq)]
 pub enum Command {
     /// `cyolo profile <...>` → profile management
@@ -23,7 +24,10 @@ pub enum Command {
     Diet(Vec<String>),
     /// `cyolo version <...>` → list installed / upstream Claude Code versions
     Version(Vec<String>),
-    /// `cyolo update <version>` → switch the active version via the launcher symlink
+    /// `cyolo use <version>` → switch the active version, downloading it first
+    /// if it isn't installed yet
+    Use(Vec<String>),
+    /// `cyolo update <version>` → legacy form; now redirects to `cyolo use`
     Update(Vec<String>),
     /// `cyolo help` / `cyolo --help` / `cyolo -h` → print cyolo's own help
     Help,
@@ -37,13 +41,15 @@ pub fn classify(args: &[String]) -> Command {
         Some("profile") => Command::Profile(args[1..].to_vec()),
         Some("diet") => Command::Diet(args[1..].to_vec()),
         Some("version") => Command::Version(args[1..].to_vec()),
-        // `update` is split three ways: `--help`/`-h` shows cyolo's own
-        // version-switch help; a positional `<version>` switches locally; and
-        // bare `cyolo update` (or any other flag) falls through to `claude
-        // update` — Claude Code's native auto-updater — preserving the
-        // documented pass-through.
+        // `use` is cyolo's version-switch verb: switch to a build, downloading
+        // it first if it isn't installed yet. Everything after the token is
+        // handed to the verb (version + flags like `--yes`).
+        Some("use") => Command::Use(args[1..].to_vec()),
+        // `update` now means "update to the latest build" — it passes through
+        // to `claude update` (Claude Code's native auto-updater). The one
+        // exception is a leftover positional `<version>` (the old switch
+        // habit): we intercept it to redirect the user to `cyolo use`.
         Some("update") => match args.get(1).map(|s| s.as_str()) {
-            Some("--help") | Some("-h") => Command::Update(args[1..].to_vec()),
             Some(a) if !a.starts_with('-') => Command::Update(args[1..].to_vec()),
             _ => Command::Claude(args.to_vec()),
         },
@@ -60,6 +66,7 @@ pub fn route() -> Result<(), CyoloError> {
         Command::Profile(args) => profile::dispatch(&args),
         Command::Diet(args) => diet::dispatch(&args),
         Command::Version(args) => version::dispatch(&args),
+        Command::Use(args) => use_cmd::dispatch(&args),
         Command::Update(args) => update::dispatch(&args),
         Command::Help => {
             print_help();
@@ -121,7 +128,8 @@ fn print_help() {
     println!("  {}{}  Manage per-account config directories", "profile".green(), " ...        ");
     println!("  {}{}  Report / reclaim orphaned project data + caches", "diet".green(), " ...           ");
     println!("  {}{}  List installed (and upstream) Claude Code versions", "version".green(), " [ls [remote]]");
-    println!("  {}{}  Switch the active version (already-installed builds only)", "update".green(), " <ver>    ");
+    println!("  {}{}  Switch the active version (downloads it first if missing)", "use".green(), " <ver>        ");
+    println!("  {}{}  Update to the latest build (passes through to claude update)", "update".green(), "           ");
     println!("  {}{}  Show this message (also: --help / -h)", "help".green(), "               ");
     println!();
     println!("{}", "Anything else is forwarded as:".bold());
@@ -134,12 +142,14 @@ fn print_help() {
     println!("  cyolo diet                     # dry-run cleanup report");
     println!("  cyolo version ls               # list installed versions");
     println!("  cyolo version ls remote        # list upstream releases (npm registry)");
-    println!("  cyolo update 2.1.156           # switch to an already-installed version");
+    println!("  cyolo use 2.1.158              # switch to 2.1.158, downloading it if needed");
+    println!("  cyolo update                   # update to the latest build (claude update)");
     println!();
     println!("{}", "Notes:".dimmed());
-    println!("  {}", "* `cyolo version` / `cyolo update <ver>` switch between native-install builds".dimmed());
-    println!("  {}", "  under ~/.local/share/claude/versions (symlink repoint — no download).".dimmed());
-    println!("  {}", "* Bare `cyolo update` passes through to `claude update` (fetches latest).".dimmed());
+    println!("  {}", "* `cyolo use <ver>` switches between native-install builds under".dimmed());
+    println!("  {}", "  ~/.local/share/claude/versions — instant if installed, else it fetches".dimmed());
+    println!("  {}", "  the build via `claude install <ver>` first.".dimmed());
+    println!("  {}", "* `cyolo update` passes through to `claude update` (fetches the latest).".dimmed());
     println!("  {}", "* `cyolo --version` prints claude's version (pass-through).".dimmed());
     println!("  {}", "* Full docs: https://github.com/skyfe79/cyolo".dimmed());
 }

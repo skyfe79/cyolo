@@ -8,10 +8,11 @@
 //!   ~/.local/share/claude/versions/<version>    (executable)
 //! ```
 //!
-//! `cyolo version` reads that layout and `cyolo update <version>` repoints
-//! the launcher symlink. Both go through the [`discover`] +
-//! [`installed_versions_in`] + [`switch_in`] helpers here so the two verbs
-//! agree on exactly what "installed" and "current" mean.
+//! `cyolo version` reads that layout and `cyolo use <version>` repoints the
+//! launcher symlink (downloading the build first if it isn't installed). Both
+//! go through the [`discover`] + [`installed_versions_in`] + [`switch_in`]
+//! helpers here so the two verbs agree on exactly what "installed" and
+//! "current" mean.
 //!
 //! Following the rest of the codebase, the filesystem-touching helpers take
 //! their base path as an argument (`*_in`) so tests can drive them against a
