@@ -1,0 +1,5 @@
+mod test_plan_already_active;
+mod test_plan_switch_installed;
+mod test_plan_download_when_missing;
+mod test_looks_like_version_accepts_semver;
+mod test_looks_like_version_rejects_tags_and_garbage;

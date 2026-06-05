@@ -63,6 +63,32 @@ pub fn run_claude(args: &[String], resolved: Option<&ResolvedProfile>) -> Result
     }
 }
 
+/// Run `claude install <version>` to download and lay out a specific native
+/// build under `~/.local/share/claude/versions`.
+///
+/// Delegates the actual fetch (platform/Rosetta/musl detection, checksum
+/// verification, GCS download) to Claude Code's own installer rather than
+/// reimplementing it — `cyolo use <version>` calls this when the requested
+/// version isn't installed yet. Inherits stdio so the user sees claude's
+/// download + checksum progress live.
+pub fn run_claude_install(version: &str) -> Result<(), CyoloError> {
+    let claude = find_claude()?;
+    let status = Command::new(&claude)
+        .arg("install")
+        .arg(version)
+        .status()
+        .map_err(|e| CyoloError::ClaudeExecFailed {
+            path: claude.clone(),
+            source: e,
+        })?;
+
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err(CyoloError::NonZeroExit(code)),
+        None => Err(CyoloError::NonZeroExit(1)),
+    }
+}
+
 /// Spawn `claude` with `CLAUDE_CONFIG_DIR=<config_dir>` for interactive OAuth
 /// login into a specific profile.
 ///
