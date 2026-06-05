@@ -4,9 +4,15 @@
 # Builds cyolo from the current clone and drops the binary into
 # ~/.cargo/bin/cyolo. Requires Rust 1.85+ (edition 2024).
 #
-#   ./install.sh            # release build
-#   ./install.sh --debug    # dev build (faster, larger binary)
-#   ./install.sh --locked   # forward --locked to cargo install (CI-friendly)
+#   ./install.sh                  # release build
+#   ./install.sh --debug          # dev build (faster, larger binary)
+#   ./install.sh --locked         # forward --locked to cargo install (CI-friendly)
+#   ./install.sh --no-modify-path # don't touch shell rc files (CI-friendly)
+#
+# When ~/.cargo/bin is not already on PATH, the installer appends an
+# `export PATH=...` line to your shell's rc file (.zshrc / .bashrc /
+# config.fish / .profile). The edit is idempotent and can be skipped
+# with --no-modify-path.
 
 set -eu
 
@@ -18,6 +24,7 @@ MSRV_MINOR=85
 
 CARGO_FLAGS="--force"
 PROFILE_LABEL="release"
+MODIFY_PATH=1
 for arg in "$@"; do
     case "$arg" in
         --debug)
@@ -27,8 +34,11 @@ for arg in "$@"; do
         --locked)
             CARGO_FLAGS="$CARGO_FLAGS --locked"
             ;;
+        --no-modify-path)
+            MODIFY_PATH=0
+            ;;
         -h|--help)
-            sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -74,13 +84,68 @@ echo ""
 echo "==> Installed: $INSTALLED"
 "$INSTALLED" --version 2>/dev/null || true
 
+# Append a PATH export to the user's shell rc when needed. Idempotent:
+# re-running won't add duplicate lines. fish uses its own syntax.
+configure_shell_path() {
+    bin_dir="$1"
+    shell_name="$(basename "${SHELL:-/bin/sh}")"
+
+    case "$shell_name" in
+        zsh)
+            rc_file="${ZDOTDIR:-$HOME}/.zshrc"
+            path_line="export PATH=\"$bin_dir:\$PATH\""
+            ;;
+        bash)
+            # macOS login shells read .bash_profile; Linux reads .bashrc.
+            if [ "$(uname -s)" = "Darwin" ] && [ -f "$HOME/.bash_profile" ]; then
+                rc_file="$HOME/.bash_profile"
+            else
+                rc_file="$HOME/.bashrc"
+            fi
+            path_line="export PATH=\"$bin_dir:\$PATH\""
+            ;;
+        fish)
+            rc_file="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
+            path_line="fish_add_path \"$bin_dir\""
+            ;;
+        *)
+            rc_file="$HOME/.profile"
+            path_line="export PATH=\"$bin_dir:\$PATH\""
+            ;;
+    esac
+
+    mkdir -p "$(dirname "$rc_file")"
+    [ -f "$rc_file" ] || : > "$rc_file"
+
+    # Already present (line or the bin dir referenced) -> nothing to do.
+    if grep -qF "$bin_dir" "$rc_file" 2>/dev/null; then
+        echo ""
+        echo "==> $bin_dir already referenced in $rc_file"
+        return 0
+    fi
+
+    {
+        echo ""
+        echo "# Added by cyolo install.sh"
+        echo "$path_line"
+    } >> "$rc_file"
+
+    echo ""
+    echo "==> Added $bin_dir to PATH in $rc_file"
+    echo "    Restart your shell or run: source $rc_file"
+}
+
 case ":$PATH:" in
     *":$CARGO_BIN:"*)
         ;;
     *)
-        echo ""
-        echo "Note: $CARGO_BIN is not on your PATH. Add this line to your shell rc:"
-        echo "    export PATH=\"$CARGO_BIN:\$PATH\""
+        if [ "$MODIFY_PATH" -eq 1 ]; then
+            configure_shell_path "$CARGO_BIN"
+        else
+            echo ""
+            echo "Note: $CARGO_BIN is not on your PATH. Add this line to your shell rc:"
+            echo "    export PATH=\"$CARGO_BIN:\$PATH\""
+        fi
         ;;
 esac
 
